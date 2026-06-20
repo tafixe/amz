@@ -1,0 +1,41 @@
+name: Scan Amazon Affiliate Links
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scraper.py"
+      - ".github/workflows/amazon.yml"
+
+jobs:
+  amazon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Scan Amazon links
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AMAZON_R2_BUCKET: ofertas-amazon
+          AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
+          AMAZON_AFFILIATE_TAGS_JSON: ${{ secrets.AMAZON_AFFILIATE_TAGS_JSON }}
+          AMAZON_TELEGRAM_CHANNELS_JSON: ${{ secrets.AMAZON_TELEGRAM_CHANNELS_JSON }}
+          AMAZON_WEB_PAGES_JSON: ${{ secrets.AMAZON_WEB_PAGES_JSON }}
+          SOURCES_JSON: ${{ secrets.SOURCES_JSON }}
+          KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
+        run: python scraper.py --amazon

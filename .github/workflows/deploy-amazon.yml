@@ -1,0 +1,70 @@
+name: Deploy Amazon Worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "worker-amazon/**"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Create R2 bucket (idempotent)
+        working-directory: worker-amazon
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@3 r2 bucket create ofertas-amazon || echo "bucket may already exist"
+
+      - name: Deploy worker
+        working-directory: worker-amazon
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@3 deploy
+
+      - name: Upload static link lists to the bucket (if present locally)
+        working-directory: worker-amazon
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          [ -f data/pd26_es.json ] && npx --yes wrangler@3 r2 object put "ofertas-amazon/data/pd26_es.json" --file data/pd26_es.json --content-type "application/json" || echo "pd26_es.json not in repo — keeping the copy already in R2"
+          [ -f data/top100_es.json ] && npx --yes wrangler@3 r2 object put "ofertas-amazon/data/top100_es.json" --file data/top100_es.json --content-type "application/json" || echo "top100_es.json not in repo — keeping the copy already in R2"
+
+      - name: Configure worker secrets (password, proxies, promo link)
+        working-directory: worker-amazon
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_PASS: ${{ secrets.AMAZON_ADMIN_PASSWORD }}
+          PROXY_A_URL: ${{ secrets.PROXY_A_URL }}
+          PROXY_B_URL: ${{ secrets.PROXY_B_URL }}
+          PROMO_URL: ${{ secrets.PROMO_URL }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+          GH_REPO: ${{ secrets.GH_REPO }}
+          GH_WORKFLOW: ${{ secrets.GH_WORKFLOW }}
+        run: |
+          if [ -n "$ADMIN_PASS" ]; then
+            printf '%s' "$ADMIN_PASS" | npx --yes wrangler@3 secret put ADMIN_PASSWORD
+          else
+            echo "AMAZON_ADMIN_PASSWORD not set — the dashboard stays locked until you set it."
+          fi
+          [ -n "$PROXY_A_URL" ] && printf '%s' "$PROXY_A_URL" | npx --yes wrangler@3 secret put PROXY_A_URL || echo "PROXY_A_URL not set"
+          [ -n "$PROXY_B_URL" ] && printf '%s' "$PROXY_B_URL" | npx --yes wrangler@3 secret put PROXY_B_URL || echo "PROXY_B_URL not set"
+          [ -n "$PROMO_URL" ] && printf '%s' "$PROMO_URL" | npx --yes wrangler@3 secret put PROMO_URL || echo "PROMO_URL not set"
+          [ -n "$GH_DISPATCH_TOKEN" ] && printf '%s' "$GH_DISPATCH_TOKEN" | npx --yes wrangler@3 secret put GH_DISPATCH_TOKEN || echo "GH_DISPATCH_TOKEN not set"
+          [ -n "$GH_REPO" ] && printf '%s' "$GH_REPO" | npx --yes wrangler@3 secret put GH_REPO || echo "GH_REPO not set"
+          [ -n "$GH_WORKFLOW" ] && printf '%s' "$GH_WORKFLOW" | npx --yes wrangler@3 secret put GH_WORKFLOW || echo "GH_WORKFLOW not set"

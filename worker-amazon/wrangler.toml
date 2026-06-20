@@ -1,0 +1,17 @@
+name = "ofertas-amazon"
+main = "worker.js"
+compatibility_date = "2024-06-01"
+workers_dev = true
+
+# account_id comes from the CLOUDFLARE_ACCOUNT_ID env var at deploy time.
+# The custom domain is bound in the Cloudflare dashboard (not in this file),
+# so nothing here identifies the live site.
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ofertas-amazon"
+
+# Reliable 10-min trigger for the scan (GitHub's own cron is throttled). The
+# scheduled() handler dispatches the workflow via the GitHub API.
+[triggers]
+crons = ["*/10 * * * *"]

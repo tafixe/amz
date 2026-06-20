@@ -1,0 +1,14 @@
+downloads/
+logs/
+downloaded.json
+amazon_links.json
+amazon.html
+__pycache__/
+*.pyc
+.env
+*.DS_Store
+.wrangler/
+.claude/
+
+# Static link lists (contain affiliate tag; uploaded to R2 separately)
+worker-amazon/data/*.json
