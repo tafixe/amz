@@ -675,6 +675,50 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     return out
 
 
+def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
+    """Deals from a JS-rendered aggregator's JSON API (newest first). Keep only
+    Amazon.es deals, resolve each offer link to its ASIN, and use the API's own
+    product name and publish date. Returns (amazon_url, iso_date, coupon, low, name)."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    base = SOURCES.get("mi_api", "")
+    if not base:
+        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    sess.headers["Accept"] = "application/json"
+    seen = set()
+    resolved = 0
+    for page in (1, 2):
+        try:
+            data = sess.get(f"{base}?page={page}&limit=50", timeout=40).json()
+            results = (data.get("deals", {}) or {}).get("results", [])
+        except (requests.RequestException, ValueError) as e:
+            log.error("mi: %s", e)
+            break
+        if not results:
+            break
+        for r in results:
+            stores = r.get("store", []) or []
+            if not any(s.get("slug") == "amazon-es" or "amazon" in (s.get("name", "").lower()) for s in stores):
+                continue   # Amazon.es only
+            ou = r.get("offer_url", "")
+            if not ou or resolved >= 60:
+                continue
+            try:  # the offer link is a shortener that redirects to the product
+                final = sess.get(ou, timeout=20, allow_redirects=True).url
+                resolved += 1
+            except requests.RequestException:
+                continue
+            m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", final)
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            out.append((f"https://www.amazon.es/dp/{m.group(1)}",
+                        r.get("created_at") or "", "", False, _clean_name(r.get("name", ""))))
+    log.info("mi: %d amazon.es deals", len(out))
+    return out
+
+
 def scrape_amazon_links():
     """Scan each configured Telegram list into its own JSON, then refresh the page.
     Telegram tab -> data/amazon_links.json ; Descontos tab -> data/descontos.json."""
@@ -719,6 +763,7 @@ def scrape_amazon_links():
         ([], [], get_chollo_items, "data/chollo.json"),
         ([], [], lambda: get_dez_items(cupo_recent), "data/dez.json"),
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
+        ([], [], get_mi_items, "data/mi.json"),
         ([], [], get_titas_items, "data/titas.json"),
     ]:
         is_titas = state_key == "data/titas.json"
@@ -727,7 +772,8 @@ def scrape_amazon_links():
         if is_titas:
             exclude |= hist
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
-                                "data/dez.json", "data/nas.json", "data/titas.json")
+                                "data/dez.json", "data/nas.json", "data/mi.json",
+                                "data/titas.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins)
         for l in last.get("links", []):
@@ -1037,6 +1083,7 @@ const TABS = [
   { id:"chollo", label:"Chollo",     src:"/data/chollo.json",       kind:"tg" },
   { id:"dez",    label:"DEZ",        src:"/data/dez.json",          kind:"tg" },
   { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg" },
+  { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
   { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
