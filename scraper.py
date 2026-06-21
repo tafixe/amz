@@ -700,6 +700,19 @@ def scrape_amazon_links():
     hist = set(hist_list)
     claimed = set()
 
+    # Reserved analysis lists (PD26 ES, Top 100 ES) — exclude their ASINs from
+    # every dynamic tab so those products stay set aside for manual analysis.
+    static_asins = set()
+    for skey in ("data/pd26_es.json", "data/top100_es.json"):
+        data = r2_get_amazon_links(skey)
+        items = data if isinstance(data, list) else (data.get("links", []) if isinstance(data, dict) else [])
+        for it in items:
+            if isinstance(it, dict):
+                a = _asin_from_url(it.get("url", ""))
+                if a:
+                    static_asins.add(a)
+    log.info("analysis lists (PD26/Top100): %d asins excluded from dynamic tabs", len(static_asins))
+
     last = None
     for channels, web_pages, items_fn, state_key in [
         (AMAZON_TELEGRAM_CHANNELS, AMAZON_WEB_PAGES, None, "data/amazon_links.json"),
@@ -711,8 +724,9 @@ def scrape_amazon_links():
         ([], [], get_titas_items, "data/titas.json"),
     ]:
         is_titas = state_key == "data/titas.json"
-        # Exclude reference-source 12h ASINs + any ASIN already on an earlier tab.
-        exclude = set(cupo_recent) | claimed
+        # Exclude reference-source ASINs, the reserved analysis lists, and any
+        # ASIN already shown on an earlier tab (cross-tab uniqueness).
+        exclude = set(cupo_recent) | claimed | static_asins
         if is_titas:
             exclude |= hist
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
