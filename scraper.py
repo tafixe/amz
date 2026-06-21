@@ -664,66 +664,6 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     return out
 
 
-def get_nas_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
-    """Source (like the DEZ source) re-posts reference-source deals. It's WordPress
-    and encodes the ASIN in each post's slug (e.g. 'b084qxy478-3' -> B084QXY478);
-    its buy button redirects to amazon.es. Keep only deals whose ASIN was NOT on
-    the reference source in the last 12 hours. Returns (amazon_url, iso_date, coupon, low).
-    No reliable price feed, so no Keepa all-time-low flag here."""
-    out: list[tuple[str, str, str, bool]] = []
-    sess = requests.Session()
-    sess.headers.update(_BROWSER_HEADERS)
-
-    if cupo_recent is None:
-        cupo_recent = reference_recent_asins(sess, hours=REFERENCE_WINDOW_HOURS)   # ASINs to exclude
-
-    # Source posts, newest first; the slug carries the ASIN. The source's bot
-    # protection blocks the GitHub Actions IP, so fetch through a proxy
-    # (edge IP); fall back to direct if the proxy fails.
-    proxy = SOURCES.get("nas_proxy", "")
-    direct = SOURCES.get("nas_direct", "")
-    if not proxy and not direct:
-        return out
-    posts = []
-    for page in (1, 2):
-        chunk = None
-        srcs = [s for s in (f"{proxy}?page={page}" if proxy else "",
-                            f"{direct}{page}" if direct else "") if s]
-        for src in srcs:
-            try:
-                r = sess.get(src, timeout=40)
-                if r.status_code == 200:
-                    chunk = r.json()
-                    if chunk:
-                        break
-            except (requests.RequestException, ValueError) as e:
-                log.warning("nas fetch %s: %s", src, e)
-        if not chunk:
-            break
-        posts += chunk
-
-    seen = set()
-    kept = 0
-    for p in posts:
-        slug = (p.get("slug") or "").upper()
-        asin = re.sub(r"-\d+$", "", slug)       # strip the WP "-2", "-3" suffix
-        if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
-            continue
-        if asin in cupo_recent:                 # on reference source in last 12h -> skip
-            continue
-        seen.add(asin)
-        dg = p.get("date_gmt") or ""
-        try:  # date_gmt is UTC without a zone -> emit a zoned ISO string
-            date = datetime.fromisoformat(dg).replace(tzinfo=timezone.utc).isoformat()
-        except ValueError:
-            date = ""
-        name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
-        out.append((f"https://www.amazon.es/dp/{asin}", date, "", False, name))
-        kept += 1
-    log.info("nas: %d posts -> %d kept (not on reference source last 12h)", len(posts), kept)
-    return out
-
-
 def scrape_amazon_links():
     """Scan each configured Telegram list into its own JSON, then refresh the page.
     Telegram tab -> data/amazon_links.json ; Descontos tab -> data/descontos.json."""
@@ -767,7 +707,7 @@ def scrape_amazon_links():
         ([], SOURCES.get("deluxe_pages", []), None, "data/deluxe.json"),
         ([], [], get_chollo_items, "data/chollo.json"),
         ([], [], lambda: get_dez_items(cupo_recent), "data/dez.json"),
-        ([], [], lambda: get_nas_items(cupo_recent), "data/nas.json"),
+        (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_titas_items, "data/titas.json"),
     ]:
         is_titas = state_key == "data/titas.json"
