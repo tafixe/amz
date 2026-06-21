@@ -165,13 +165,24 @@ def _affiliate_tag_for(marketplace: str) -> str:
     return AMAZON_AFFILIATE_TAGS.get(marketplace, AMAZON_AFFILIATE_TAG)
 
 
+# Some channels post products through a custom shortener whose path carries the
+# ASIN directly (e.g. <host>/amz/<ASIN>). Treat those as amazon.es products.
+CUSTOM_ASIN_RE = re.compile(r"https?://[^\s\"'<>)]+?/amz/([A-Z0-9]{10})", re.IGNORECASE)
+
+
 def extract_amazon_urls(text: str) -> list[str]:
-    """Find all raw Amazon URLs (long or short) inside a blob of text/HTML."""
+    """Find all raw Amazon URLs (long or short) inside a blob of text/HTML,
+    plus custom /amz/<ASIN> shortener links (converted to amazon.es)."""
     if not text:
         return []
+    t = html.unescape(text)
     found = []
-    for m in AMAZON_HOST_RE.finditer(html.unescape(text)):
+    for m in AMAZON_HOST_RE.finditer(t):
         url = m.group(0).rstrip(".,);]​")
+        if url not in found:
+            found.append(url)
+    for m in CUSTOM_ASIN_RE.finditer(t):
+        url = f"https://www.amazon.es/dp/{m.group(1).upper()}"
         if url not in found:
             found.append(url)
     return found
