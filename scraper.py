@@ -749,10 +749,6 @@ def scrape_amazon_links():
 
     # Cross-tab uniqueness: an ASIN shows on the FIRST tab (in this order) that
     # has it. `claimed` holds ASINs already taken; later tabs exclude them.
-    # TITAS additionally excludes ASINs ever seen on other tabs (`hist`).
-    OTHERS_KEY = "data/other_asins.json"
-    hist_list = r2_get_amazon_links(OTHERS_KEY).get("asins", [])
-    hist = set(hist_list)
     claimed = set()
 
     last = None
@@ -766,11 +762,9 @@ def scrape_amazon_links():
         ([], [], get_mi_items, "data/mi.json"),
         ([], [], get_titas_items, "data/titas.json"),
     ]:
-        is_titas = state_key == "data/titas.json"
-        # Exclude reference-source 12h ASINs + any ASIN already on an earlier tab.
+        # Exclude reference-source ASINs + any ASIN already shown on an earlier
+        # tab this run (cross-tab uniqueness, applied equally to every tab).
         exclude = set(cupo_recent) | claimed
-        if is_titas:
-            exclude |= hist
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/titas.json")
@@ -780,11 +774,6 @@ def scrape_amazon_links():
             a = _asin_from_url(l["url"])
             if a:
                 claimed.add(a)   # taken — no other tab shows it this run
-
-    # Persist the ASIN history (keeps TITAS unique across runs too).
-    new = [a for a in sorted(claimed) if a not in hist]
-    if new:
-        r2_put_amazon_links({"asins": (hist_list + new)[-50000:]}, OTHERS_KEY)
 
     # Refresh transversal all-time-low flags for this run's ASINs (capped/cached).
     keepa_low_refresh(sorted(all_asins), low_cache)
