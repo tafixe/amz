@@ -434,51 +434,6 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
-def get_titas_items() -> list[tuple[str, str, str]]:
-    """Source is WordPress; its category pages are JS-rendered, so use the
-    REST API to read recent deal posts across the whole site. Each post's content
-    has the Amazon ASIN (?asin=ASIN) and the post date is the real publish
-    time. Returns (amazon_url, iso_date, "")."""
-    out: list[tuple[str, str, str]] = []
-    seen = set()
-    sess = requests.Session()
-    sess.headers.update(_BROWSER_HEADERS)
-    # The source blocks the GitHub Actions IP, so fetch through a proxy
-    # (edge IP); fall back to direct if the proxy fails.
-    proxy = SOURCES.get("titas_proxy", "")
-    direct = SOURCES.get("titas_direct", "")
-    if not proxy and not direct:
-        return out
-    for page in (1, 2):
-        posts = None
-        srcs = [s for s in (f"{proxy}?page={page}" if proxy else "",
-                            f"{direct}{page}" if direct else "") if s]
-        for src in srcs:
-            try:
-                r = sess.get(src, timeout=40)
-                if r.status_code == 200:
-                    posts = r.json()
-                    if posts:
-                        break
-            except (requests.RequestException, ValueError) as e:
-                log.warning("titas fetch %s: %s", src, e)
-        if not posts:
-            break
-        for p in posts:
-            content = (p.get("content", {}) or {}).get("rendered", "")
-            m = re.search(r"[?&]asin=([A-Z0-9]{10})", content)
-            if not m or m.group(1) in seen:
-                continue
-            seen.add(m.group(1))
-            date = p.get("date_gmt") or p.get("date") or ""
-            if date and not date.endswith(("Z", "+00:00")):
-                date += "+00:00"   # WP gives GMT without a zone
-            name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
-            out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
-    log.info("titas: %d amazon.es deals", len(out))
-    return out
-
-
 def _keepa_min_cents(product) -> int | None:
     """All-time minimum price (cents) from a Keepa product's Amazon/New history."""
     if not product:
@@ -760,14 +715,12 @@ def scrape_amazon_links():
         ([], [], lambda: get_dez_items(cupo_recent), "data/dez.json"),
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_mi_items, "data/mi.json"),
-        ([], [], get_titas_items, "data/titas.json"),
     ]:
         # Exclude reference-source ASINs + any ASIN already shown on an earlier
         # tab this run (cross-tab uniqueness, applied equally to every tab).
         exclude = set(cupo_recent) | claimed
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
-                                "data/dez.json", "data/nas.json", "data/mi.json",
-                                "data/titas.json")
+                                "data/dez.json", "data/nas.json", "data/mi.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins)
         for l in last.get("links", []):
@@ -1073,7 +1026,6 @@ const TABS = [
   { id:"dez",    label:"DEZ",        src:"/data/dez.json",          kind:"tg" },
   { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg" },
   { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
-  { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
   { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
 ];
