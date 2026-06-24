@@ -728,12 +728,14 @@ def scrape_amazon_links():
         ([], [], lambda: get_dez_items(cupo_recent), "data/dez.json"),
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_mi_items, "data/mi.json"),
+        ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
     ]:
         # Exclude reference-source ASINs + any ASIN already shown on an earlier
         # tab this run (cross-tab uniqueness, applied equally to every tab).
         exclude = set(cupo_recent) | claimed
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
-                                "data/dez.json", "data/nas.json", "data/mi.json")
+                                "data/dez.json", "data/nas.json", "data/mi.json",
+                                "data/cholloes.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
                                 price_budget)
@@ -1051,6 +1053,7 @@ const TABS = [
   { id:"dez",    label:"DEZ",        src:"/data/dez.json",          kind:"tg" },
   { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg" },
   { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
+  { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
   { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
 ];
