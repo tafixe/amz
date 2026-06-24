@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Amazon Affiliate Links Dashboard - Scraper"""
 
+import email.utils
 import hashlib
 import html
 import json
@@ -684,6 +685,40 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
+    """Highlighted deals from a price-tracker's RSS feed (the feed escapes the
+    site's bot challenge). Each item's /product/<ASIN> link carries the ASIN and
+    the <title> is the product name. Returns (amazon_url, iso_date, "", low, name)."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    feed = SOURCES.get("camel_feed", "")
+    if not feed:
+        return out
+    try:
+        x = requests.get(feed, headers=_BROWSER_HEADERS, timeout=40).text
+    except requests.RequestException as e:
+        log.error("camel: %s", e)
+        return out
+    seen = set()
+    for it in re.findall(r"<item>(.*?)</item>", x, re.S):
+        ln = re.search(r"<link>(.*?)</link>", it, re.S)
+        m = re.search(r"/product/([A-Z0-9]{10})(?:[?/<]|$)", ln.group(1)) if ln else None
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        tt = re.search(r"<title>(.*?)</title>", it, re.S)
+        name = _clean_name(re.sub(r"<.*?>", "", tt.group(1))) if tt else ""
+        pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+        date = ""
+        if pd:
+            try:  # RFC822 -> zoned ISO so it sorts chronologically
+                date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
+            except Exception:
+                date = ""
+        out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
+    log.info("camel: %d highlighted deals", len(out))
+    return out
+
+
 def scrape_amazon_links():
     """Scan each configured Telegram list into its own JSON, then refresh the page.
     Telegram tab -> data/amazon_links.json ; Descontos tab -> data/descontos.json."""
@@ -729,13 +764,14 @@ def scrape_amazon_links():
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_mi_items, "data/mi.json"),
         ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
+        ([], [], get_camel_items, "data/camel.json"),
     ]:
         # Exclude reference-source ASINs + any ASIN already shown on an earlier
         # tab this run (cross-tab uniqueness, applied equally to every tab).
         exclude = set(cupo_recent) | claimed
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
-                                "data/cholloes.json")
+                                "data/cholloes.json", "data/camel.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
                                 price_budget)
@@ -1054,6 +1090,7 @@ const TABS = [
   { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg" },
   { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
+  { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
   { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
 ];
