@@ -442,18 +442,22 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
-# Keepa csv price series we treat as the real buy-from-Amazon price: Amazon,
-# New, New shipped by Amazon (FBA), and New Prime-exclusive (often the lowest).
-KEEPA_PRICE_IDX = (0, 1, 10, 33)
+# Only Amazon-fulfilled / Prime-guaranteed price series — NO generic "New" (1)
+# which includes 3rd-party FBM sellers (gave false 'not at min').
+#  - all-time MIN includes Lightning deals (8): past flash-sale lows must count,
+#    otherwise we'd falsely call something an all-time low.
+#  - CURRENT price excludes Lightning (an ended flash price isn't buyable now).
+KEEPA_MIN_IDX = (0, 8, 10, 33)   # Amazon, Lightning, New-FBA, Prime-exclusive
+KEEPA_CUR_IDX = (0, 10, 33)      # Amazon, New-FBA, Prime-exclusive
 
 
 def _keepa_min_cents(product) -> int | None:
-    """All-time minimum price (cents) across Amazon / New / New-FBA / Prime-excl."""
+    """All-time minimum price (cents) — Amazon-fulfilled series + Lightning deals."""
     if not product:
         return None
     csv = product.get("csv") or []
     vals = []
-    for idx in KEEPA_PRICE_IDX:
+    for idx in KEEPA_MIN_IDX:
         if idx < len(csv) and csv[idx]:
             arr = csv[idx]
             for j in range(1, len(arr), 2):  # [time, price, time, price, ...]
@@ -464,12 +468,13 @@ def _keepa_min_cents(product) -> int | None:
 
 
 def _keepa_current_cents(product) -> int | None:
-    """Best current price (cents) — lowest latest value across the same series."""
+    """Best current price (cents) — lowest latest Amazon/FBA/Prime value (no FBM,
+    no ended Lightning)."""
     if not product:
         return None
     csv = product.get("csv") or []
     cur = []
-    for idx in KEEPA_PRICE_IDX:
+    for idx in KEEPA_CUR_IDX:
         if idx < len(csv) and csv[idx]:
             arr = csv[idx]
             for j in range(len(arr) - 1, 0, -2):  # latest [time, price] pair
