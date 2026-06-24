@@ -465,16 +465,18 @@ def _keepa_current_cents(product) -> int | None:
     return None
 
 
-def keepa_low_refresh(asins: list, low_cache: dict):
+def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN) -> int:
     """Refresh the all-time-low flag for ASINs (transversal to every tab) and
     mutate low_cache: {asin: {"low": bool, "checked": iso}}. A 24h TTL plus a
-    per-run cap keep token use ~1/product and well within budget."""
-    if not KEEPA_API_KEY or not asins:
-        return
+    per-run cap keep token use ~1/product. Returns how many were (re)priced."""
+    if not KEEPA_API_KEY or not asins or max_count <= 0:
+        return 0
     now = datetime.now(timezone.utc)
     ttl = timedelta(hours=KEEPA_TTL_HOURS)
     stale = []
     for a in asins:
+        if not a or a in stale:
+            continue
         c = low_cache.get(a)
         fresh = False
         if c and "checked" in c:
@@ -484,7 +486,7 @@ def keepa_low_refresh(asins: list, low_cache: dict):
                 fresh = False
         if not fresh:
             stale.append(a)
-    stale = stale[:KEEPA_MAX_PRICE_PER_RUN]   # cap tokens per run
+    stale = stale[:max_count]   # cap tokens per run (shared budget)
     done = 0
     for i in range(0, len(stale), 100):
         batch = stale[i:i + 100]
@@ -508,6 +510,7 @@ def keepa_low_refresh(asins: list, low_cache: dict):
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
+    return done
 
 
 def keepa_titles(asins: list) -> tuple:
@@ -698,9 +701,12 @@ def scrape_amazon_links():
     keepa_tried = set(_nm.get("tried", []))   # ASINs already looked up on Keepa
 
     # Transversal all-time-low cache (per ASIN, 24h TTL), shared by every tab.
+    # Priced via Keepa BEFORE each tab is written, so the dot is right on first
+    # appearance. price_budget is the shared per-run token cap across all tabs.
     LOW_KEY = "data/keepa.json"
     low_cache = r2_get_amazon_links(LOW_KEY).get("k", {})
-    all_asins = set()           # every ASIN shown this run -> for the low refresh
+    all_asins = set()           # every ASIN shown this run -> to bound the cache
+    price_budget = [KEEPA_MAX_PRICE_PER_RUN]
 
     # Cross-tab uniqueness: an ASIN shows on the FIRST tab (in this order) that
     # has it. `claimed` holds ASINs already taken; later tabs exclude them.
@@ -722,14 +728,15 @@ def scrape_amazon_links():
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
-                                exclude, by_date, name_map, keepa_tried, low_cache, all_asins)
+                                exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
+                                price_budget)
         for l in last.get("links", []):
             a = _asin_from_url(l["url"])
             if a:
                 claimed.add(a)   # taken — no other tab shows it this run
 
-    # Refresh transversal all-time-low flags for this run's ASINs (capped/cached).
-    keepa_low_refresh(sorted(all_asins), low_cache)
+    # Persist the all-time-low cache (already refreshed per-tab before writing),
+    # bounded to the ASINs still shown.
     low_cache = {a: low_cache[a] for a in all_asins if a in low_cache}
     r2_put_amazon_links({"k": low_cache}, LOW_KEY)
 
@@ -747,7 +754,7 @@ def _asin_from_url(u: str) -> str:
     return m.group(1) if m else ""
 
 
-def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None):
+def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None):
     """Build the freshest batch of clean affiliate links for one source list."""
     existing = r2_get_amazon_links(state_key)
     # Resolution cache: raw short/long URL -> resolved dict (avoids re-expanding).
@@ -883,10 +890,21 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             link_date = seen.get(url) or now_iso
             seen[url] = link_date
         link = {"name": name, "url": url, "date": link_date}
-        # All-time-low (Keepa) — transversal flag from the shared cache.
-        if raw_to_low.get(raw_url) or (low_cache and (low_cache.get(asin) or {}).get("low")):
-            link["low"] = True
+        if raw_to_low.get(raw_url):
+            link["low"] = True   # provider already says it's an all-time low
         links.append(link)
+
+    # All-time-low (Keepa) BEFORE writing: price this tab's ASINs that aren't
+    # fresh in the cache (shared per-run budget protects tokens), so the dot is
+    # correct the moment the deal appears — no one-run delay.
+    if low_cache is not None and KEEPA_API_KEY:
+        cap = price_budget[0] if price_budget else KEEPA_MAX_PRICE_PER_RUN
+        used = keepa_low_refresh([_asin_from_url(l["url"]) for l in links], low_cache, cap)
+        if price_budget:
+            price_budget[0] -= used
+        for l in links:
+            if (low_cache.get(_asin_from_url(l["url"])) or {}).get("low"):
+                l["low"] = True
 
     # Last resort: fill any still-nameless link from Keepa (paid). Each ASIN is
     # queried at most once ever (tracked in keepa_tried) and capped per run, so
