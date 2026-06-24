@@ -95,7 +95,7 @@ AMAZON_MAX_TITLE_FETCH_PER_RUN = int(os.environ.get("AMAZON_MAX_TITLE_FETCH_PER_
 # all-time-low price. Needs a paid API key; without it the feature is disabled.
 KEEPA_API_KEY = os.environ.get("KEEPA_API_KEY", "").strip()
 KEEPA_DOMAIN = int(os.environ.get("KEEPA_DOMAIN", "9"))      # 9 = amazon.es
-KEEPA_TTL_HOURS = int(os.environ.get("KEEPA_TTL_HOURS", "24"))  # re-check each ASIN once a day
+KEEPA_TTL_HOURS = int(os.environ.get("KEEPA_TTL_HOURS", "6"))  # re-price each ASIN every 6h (catch fresh drops)
 # Token safety: cap how many NEW titles we look up per list each run (each is
 # queried at most once ever, then cached). Keeps token use well under budget.
 KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"))
