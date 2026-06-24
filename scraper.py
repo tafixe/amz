@@ -434,13 +434,18 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+# Keepa csv price series we treat as the real buy-from-Amazon price: Amazon,
+# New, New shipped by Amazon (FBA), and New Prime-exclusive (often the lowest).
+KEEPA_PRICE_IDX = (0, 1, 10, 33)
+
+
 def _keepa_min_cents(product) -> int | None:
-    """All-time minimum price (cents) from a Keepa product's Amazon/New history."""
+    """All-time minimum price (cents) across Amazon / New / New-FBA / Prime-excl."""
     if not product:
         return None
     csv = product.get("csv") or []
     vals = []
-    for idx in (0, 1):  # 0=Amazon, 1=New
+    for idx in KEEPA_PRICE_IDX:
         if idx < len(csv) and csv[idx]:
             arr = csv[idx]
             for j in range(1, len(arr), 2):  # [time, price, time, price, ...]
@@ -451,18 +456,20 @@ def _keepa_min_cents(product) -> int | None:
 
 
 def _keepa_current_cents(product) -> int | None:
-    """Latest known price (cents) from a Keepa product's Amazon/New history."""
+    """Best current price (cents) — lowest latest value across the same series."""
     if not product:
         return None
     csv = product.get("csv") or []
-    for idx in (0, 1):  # 0=Amazon, 1=New — prefer Amazon's latest price
+    cur = []
+    for idx in KEEPA_PRICE_IDX:
         if idx < len(csv) and csv[idx]:
             arr = csv[idx]
-            for j in range(len(arr) - 1, 0, -2):  # walk back over [time, price] pairs
+            for j in range(len(arr) - 1, 0, -2):  # latest [time, price] pair
                 v = arr[j]
                 if isinstance(v, int) and v > 0:
-                    return v
-    return None
+                    cur.append(v)
+                    break
+    return min(cur) if cur else None
 
 
 def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN) -> int:
