@@ -686,36 +686,40 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
 
 
 def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
-    """Highlighted deals from a price-tracker's RSS feed (the feed escapes the
-    site's bot challenge). Each item's /product/<ASIN> link carries the ASIN and
-    the <title> is the product name. Returns (amazon_url, iso_date, "", low, name)."""
+    """Deals from a price-tracker's RSS feeds (highlights + popular + top drops;
+    the feeds escape the site's bot challenge). Each item's /product/<ASIN> link
+    carries the ASIN and the <title> is the product name, deduped across feeds.
+    Returns (amazon_url, iso_date, "", low, name) tuples."""
     out: list[tuple[str, str, str, bool, str]] = []
-    feed = SOURCES.get("camel_feed", "")
-    if not feed:
+    feeds = SOURCES.get("camel_feeds", [])
+    if not feeds:
         return out
-    try:
-        x = requests.get(feed, headers=_BROWSER_HEADERS, timeout=40).text
-    except requests.RequestException as e:
-        log.error("camel: %s", e)
-        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
     seen = set()
-    for it in re.findall(r"<item>(.*?)</item>", x, re.S):
-        ln = re.search(r"<link>(.*?)</link>", it, re.S)
-        m = re.search(r"/product/([A-Z0-9]{10})(?:[?/<]|$)", ln.group(1)) if ln else None
-        if not m or m.group(1) in seen:
+    for feed in feeds:
+        try:
+            x = sess.get(feed, timeout=40).text
+        except requests.RequestException as e:
+            log.warning("camel feed %s: %s", feed, e)
             continue
-        seen.add(m.group(1))
-        tt = re.search(r"<title>(.*?)</title>", it, re.S)
-        name = _clean_name(re.sub(r"<.*?>", "", tt.group(1))) if tt else ""
-        pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
-        date = ""
-        if pd:
-            try:  # RFC822 -> zoned ISO so it sorts chronologically
-                date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
-            except Exception:
-                date = ""
-        out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
-    log.info("camel: %d highlighted deals", len(out))
+        for it in re.findall(r"<item>(.*?)</item>", x, re.S):
+            ln = re.search(r"<link>(.*?)</link>", it, re.S)
+            m = re.search(r"/product/([A-Z0-9]{10})(?:[?/<]|$)", ln.group(1)) if ln else None
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            tt = re.search(r"<title>(.*?)</title>", it, re.S)
+            name = _clean_name(re.sub(r"<.*?>", "", tt.group(1))) if tt else ""
+            pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+            date = ""
+            if pd:
+                try:  # RFC822 -> zoned ISO so it sorts chronologically
+                    date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
+                except Exception:
+                    date = ""
+            out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
+    log.info("camel: %d deals from %d feeds", len(out), len(feeds))
     return out
 
 
