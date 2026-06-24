@@ -442,13 +442,14 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
-# Only Amazon-fulfilled / Prime-guaranteed price series — NO generic "New" (1)
-# which includes 3rd-party FBM sellers (gave false 'not at min').
+# Only Amazon-direct + Prime-exclusive price series — NO generic "New" (1, 3rd
+# party FBM) and NO New-FBA (10, 3rd-party sellers). Just what Amazon sells with
+# Prime guarantee.
 #  - all-time MIN includes Lightning deals (8): past flash-sale lows must count,
 #    otherwise we'd falsely call something an all-time low.
 #  - CURRENT price excludes Lightning (an ended flash price isn't buyable now).
-KEEPA_MIN_IDX = (0, 8, 10, 33)   # Amazon, Lightning, New-FBA, Prime-exclusive
-KEEPA_CUR_IDX = (0, 10, 33)      # Amazon, New-FBA, Prime-exclusive
+KEEPA_MIN_IDX = (0, 8, 33)   # Amazon, Lightning, Prime-exclusive
+KEEPA_CUR_IDX = (0, 33)      # Amazon, Prime-exclusive
 
 
 def _keepa_min_cents(product) -> int | None:
