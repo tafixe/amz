@@ -103,6 +103,13 @@ KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"
 # All-time-low flag is transversal to every tab; cap how many ASINs we (re)price
 # per run so token use stays well within budget (each ~1 token, cached 24h).
 KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "40"))
+# Keepa root categories to exclude from every tab (no books). 599364031 = Libros
+# (amazon.es). Set via secret BOOK_CATS_JSON to add more (e.g. Kindle store).
+BOOK_CATS = set()
+try:
+    BOOK_CATS = set(json.loads(os.environ.get("BOOK_CATS_JSON", "[599364031]")))
+except Exception:
+    BOOK_CATS = {599364031}
 
 
 # Amazon dashboard lives in its OWN R2 bucket + worker. The bucket name comes
@@ -501,7 +508,7 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
         try:
             r = requests.get("https://api.keepa.com/product",
                              params={"key": KEEPA_API_KEY, "domain": KEEPA_DOMAIN,
-                                     "asin": ",".join(batch)}, timeout=60)
+                                     "asin": ",".join(batch), "category": 1}, timeout=60)
             data = r.json()
         except (requests.RequestException, ValueError) as e:
             log.error("keepa low refresh failed: %s", e)
@@ -514,7 +521,9 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
             mn = _keepa_min_cents(prods.get(a))
             cur = _keepa_current_cents(prods.get(a))
             low = bool(mn and cur and mn > 0 and cur > 0 and cur <= mn + 1)
-            low_cache[a] = {"low": low, "checked": now.isoformat()}
+            # Store root category too, so we can drop books (rootCategory in BOOK_CATS).
+            cat = (prods.get(a) or {}).get("rootCategory")
+            low_cache[a] = {"low": low, "checked": now.isoformat(), "cat": cat}
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
@@ -705,7 +714,8 @@ def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
             continue
         for it in re.findall(r"<item>(.*?)</item>", x, re.S):
             ln = re.search(r"<link>(.*?)</link>", it, re.S)
-            m = re.search(r"/product/([A-Z0-9]{10})(?:[?/<]|$)", ln.group(1)) if ln else None
+            # Only real product ASINs (start with B); skips ISBN-format books.
+            m = re.search(r"/product/(B[A-Z0-9]{9})(?:[?/<]|$)", ln.group(1)) if ln else None
             if not m or m.group(1) in seen:
                 continue
             seen.add(m.group(1))
@@ -954,6 +964,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         for l in links:
             if (low_cache.get(_asin_from_url(l["url"])) or {}).get("low"):
                 l["low"] = True
+        # Drop books once Keepa has told us the category (root category in BOOK_CATS).
+        if BOOK_CATS:
+            links = [l for l in links
+                     if (low_cache.get(_asin_from_url(l["url"])) or {}).get("cat") not in BOOK_CATS]
 
     # Last resort: fill any still-nameless link from Keepa (paid). Each ASIN is
     # queried at most once ever (tracked in keepa_tried) and capped per run, so
