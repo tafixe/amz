@@ -105,7 +105,7 @@ KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"
 KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "40"))
 # Flag as all-time low when the current price is within this margin of the
 # historical minimum (0.015 = 1.5%).
-KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.005"))
+KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.01"))
 # Keepa root categories to exclude from every tab (no books). 599364031 = Libros
 # (amazon.es). Set via secret BOOK_CATS_JSON to add more (e.g. Kindle store).
 BOOK_CATS = set()
