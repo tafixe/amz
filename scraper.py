@@ -445,48 +445,14 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
-# Only Amazon-direct + Prime-exclusive price series — NO generic "New" (1, 3rd
-# party FBM) and NO New-FBA (10, 3rd-party sellers). Just what Amazon sells with
-# Prime guarantee.
-#  - all-time MIN includes Lightning deals (8): past flash-sale lows must count,
-#    otherwise we'd falsely call something an all-time low.
-#  - CURRENT price excludes Lightning (an ended flash price isn't buyable now).
-KEEPA_MIN_IDX = (0, 8, 33)   # Amazon, Lightning, Prime-exclusive
-KEEPA_CUR_IDX = (0, 33)      # Amazon, Prime-exclusive
-
-
-def _keepa_min_cents(product) -> int | None:
-    """All-time minimum price (cents) — Amazon-fulfilled series + Lightning deals."""
-    if not product:
-        return None
-    csv = product.get("csv") or []
-    vals = []
-    for idx in KEEPA_MIN_IDX:
-        if idx < len(csv) and csv[idx]:
-            arr = csv[idx]
-            for j in range(1, len(arr), 2):  # [time, price, time, price, ...]
-                v = arr[j]
-                if isinstance(v, int) and v > 0:
-                    vals.append(v)
-    return min(vals) if vals else None
-
-
-def _keepa_current_cents(product) -> int | None:
-    """Best current price (cents) — lowest latest Amazon/FBA/Prime value (no FBM,
-    no ended Lightning)."""
-    if not product:
-        return None
-    csv = product.get("csv") or []
-    cur = []
-    for idx in KEEPA_CUR_IDX:
-        if idx < len(csv) and csv[idx]:
-            arr = csv[idx]
-            for j in range(len(arr) - 1, 0, -2):  # latest [time, price] pair
-                v = arr[j]
-                if isinstance(v, int) and v > 0:
-                    cur.append(v)
-                    break
-    return min(cur) if cur else None
+# Highlighted / Prime-guaranteed buyable price series — read from Keepa's
+# official stats (stats.min = all-time, stats.current = now):
+#   0 Amazon · 8 Lightning/flash deal · 18 Buy Box · 33 New Prime-exclusive
+# Generic "New" (1) and 3rd-party FBM/FBA (7/10) are EXCLUDED — volatile marketplace
+# spikes that gave false 'not at min'. stats.current is -1 for an ended Lightning,
+# so it never counts a stale flash price as the current price.
+KEEPA_PRICE_SERIES = (0, 8, 18, 33)
+KEEPA_TYPE_NAMES = {0: "Amazon", 8: "Oferta-relâmpago", 18: "Buy Box", 33: "Prime exclusive"}
 
 
 def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN) -> int:
@@ -517,7 +483,7 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
         try:
             r = requests.get("https://api.keepa.com/product",
                              params={"key": KEEPA_API_KEY, "domain": KEEPA_DOMAIN,
-                                     "asin": ",".join(batch), "category": 1}, timeout=60)
+                                     "asin": ",".join(batch), "stats": 180, "category": 1}, timeout=60)
             data = r.json()
         except (requests.RequestException, ValueError) as e:
             log.error("keepa low refresh failed: %s", e)
@@ -527,12 +493,23 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
             break
         prods = {p.get("asin"): p for p in (data.get("products") or [])}
         for a in batch:
-            mn = _keepa_min_cents(prods.get(a))
-            cur = _keepa_current_cents(prods.get(a))
-            low = bool(mn and cur and mn > 0 and cur > 0 and cur <= mn * (1 + KEEPA_LOW_MARGIN) + 1)
-            # Store root category too, so we can drop books (rootCategory in BOOK_CATS).
-            cat = (prods.get(a) or {}).get("rootCategory")
-            low_cache[a] = {"low": low, "checked": now.isoformat(), "cat": cat}
+            p = prods.get(a) or {}
+            st = p.get("stats") or {}
+            mn_arr = st.get("min") or []
+            cur_arr = st.get("current") or []
+            lowest = current = lowtype = None
+            for i in KEEPA_PRICE_SERIES:
+                m = mn_arr[i][1] if (i < len(mn_arr) and isinstance(mn_arr[i], list)
+                                     and isinstance(mn_arr[i][1], int) and mn_arr[i][1] > 0) else None
+                c = cur_arr[i] if (i < len(cur_arr) and isinstance(cur_arr[i], int) and cur_arr[i] > 0) else None
+                if m is not None and (lowest is None or m < lowest):
+                    lowest, lowtype = m, i
+                if c is not None and (current is None or c < current):
+                    current = c
+            low = bool(lowest and current and current <= lowest * (1 + KEEPA_LOW_MARGIN) + 1)
+            low_cache[a] = {"low": low, "checked": now.isoformat(),
+                            "cat": p.get("rootCategory"),
+                            "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, "")}
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
