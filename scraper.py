@@ -105,7 +105,7 @@ KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"
 KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "40"))
 # Flag as all-time low when the current price is within this margin of the
 # historical minimum (0.015 = 1.5%).
-KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.015"))
+KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.005"))
 # Keepa root categories to exclude from every tab (no books). 599364031 = Libros
 # (amazon.es). Set via secret BOOK_CATS_JSON to add more (e.g. Kindle store).
 BOOK_CATS = set()
@@ -948,8 +948,12 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if price_budget:
             price_budget[0] -= used
         for l in links:
-            if (low_cache.get(_asin_from_url(l["url"])) or {}).get("low"):
+            e = low_cache.get(_asin_from_url(l["url"])) or {}
+            if e.get("low"):
                 l["low"] = True
+                if e.get("min"):
+                    l["minp"] = round(e["min"] / 100, 2)   # historical min in €
+                    l["minlbl"] = e.get("lbl", "")          # which Keepa series
         # Drop books once Keepa has told us the category (root category in BOOK_CATS).
         if BOOK_CATS:
             links = [l for l in links
@@ -1121,7 +1125,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1190,12 +1194,17 @@ function render(){
   const visited = visitedSet();
   const useGreen = current.kind !== "tg";
   const slice = items.slice(0, shown);
-  box.innerHTML = slice.map(l =>
-    '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-    '<span class="name">'+(l.low?'<span class="low-dot" title="Preço mais baixo de sempre"></span>':'')+esc(l.name)+'</span>'+
-    (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '')+
-    '<span class="arrow">&rsaquo;</span></a></li>'
-  ).join("");
+  box.innerHTML = slice.map(l => {
+    const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
+    const dot = l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '';
+    // For all-time-low rows show the historical min price; otherwise the usual tag.
+    const tag = (l.low && l.minp)
+      ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
+      : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '');
+    return '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+      '<span class="name">'+dot+esc(l.name)+'</span>'+ tag +
+      '<span class="arrow">&rsaquo;</span></a></li>';
+  }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
 }
 
