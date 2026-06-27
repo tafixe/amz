@@ -76,7 +76,7 @@ AMAZON_BATCH_WINDOW_HOURS = int(os.environ.get("AMAZON_BATCH_WINDOW_HOURS", "24"
 # How far back to treat a reference-source post as "current" and exclude its
 # ASINs from every tab. The source re-promotes deals in the morning and keeps
 # them all day, so 24h (not 12h) covers a full promotion day.
-REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "24"))
+REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "12"))
 
 # Expanding short links (amzlink.to/amzn.to) costs one HTTP request each. We
 # cache resolutions in R2 and only resolve up to N new links per run so the
@@ -728,11 +728,18 @@ def scrape_amazon_links():
                     "— set the AMAZON_AFFILIATE_TAG secret to your real tag.")
     cleared = r2_get_amazon_cleared()  # admin-cleared / opened URLs, excluded from all lists
 
-    # Cross-check EVERY list against the reference source: drop any ASIN that was
-    # published (or re-promoted) there in the last 12h. Computed once and reused.
+    # Cross-check EVERY list against the reference source. Any ASIN seen there in
+    # the last REFERENCE_WINDOW_HOURS is STICKY-banned: it stays out of all lists
+    # forever (even after the window passes) and only returns when our own source
+    # re-publishes it with a date newer than the ban. Ban time is stored per ASIN.
     _sess = requests.Session()
     _sess.headers.update(_BROWSER_HEADERS)
     cupo_recent = reference_recent_asins(_sess, hours=REFERENCE_WINDOW_HOURS)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    BANNED_KEY = "data/cupo_banned.json"
+    banned = r2_get_amazon_links(BANNED_KEY).get("b", {})   # {asin: ban_iso}
+    for a in cupo_recent:
+        banned[a] = now_iso                                  # (re)stamp the ban as of now
 
     # Shared ASIN -> product name map. Sources that expose titles (DEZ/NAS/TITAS/
     # Chollo, and any slug) fill it; bare /dp/ASIN links on other tabs reuse it,
@@ -760,21 +767,21 @@ def scrape_amazon_links():
         (SOURCES.get("descontos_channels", []), [], None, "data/descontos.json"),
         ([], SOURCES.get("deluxe_pages", []), None, "data/deluxe.json"),
         ([], [], get_chollo_items, "data/chollo.json"),
-        ([], [], lambda: get_dez_items(cupo_recent), "data/dez.json"),
+        ([], [], lambda: get_dez_items(set()), "data/dez.json"),
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_mi_items, "data/mi.json"),
         ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
         ([], [], get_camel_items, "data/camel.json"),
     ]:
-        # Exclude reference-source ASINs + any ASIN already shown on an earlier
-        # tab this run (cross-tab uniqueness, applied equally to every tab).
-        exclude = set(cupo_recent) | claimed
+        # Exclude ASINs already shown on an earlier tab this run (cross-tab
+        # uniqueness). The reference-source sticky-ban is applied via `banned`.
+        exclude = set(claimed)
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json")
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
-                                price_budget)
+                                price_budget, banned)
         for l in last.get("links", []):
             a = _asin_from_url(l["url"])
             if a:
@@ -784,6 +791,11 @@ def scrape_amazon_links():
     # bounded to the ASINs still shown.
     low_cache = {a: low_cache[a] for a in all_asins if a in low_cache}
     r2_put_amazon_links({"k": low_cache}, LOW_KEY)
+
+    # Persist the sticky reference-source ban map (bounded to most recent bans).
+    if len(banned) > 100000:
+        banned = dict(sorted(banned.items(), key=lambda kv: kv[1])[-100000:])
+    r2_put_amazon_links({"b": banned}, BANNED_KEY)
 
     # Persist the shared ASIN -> name map + the Keepa "already tried" set (bounded).
     if len(name_map) > 80000:
@@ -799,7 +811,23 @@ def _asin_from_url(u: str) -> str:
     return m.group(1) if m else ""
 
 
-def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None):
+def _parse_dt(s):
+    """Parse an ISO timestamp (handles trailing Z); return aware datetime or None."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _dt_after(a, b) -> bool:
+    """True if timestamp a is strictly newer than b (both parseable)."""
+    da, db = _parse_dt(a), _parse_dt(b)
+    return bool(da and db and da > db)
+
+
+def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None):
     """Build the freshest batch of clean affiliate links for one source list."""
     existing = r2_get_amazon_links(state_key)
     # Resolution cache: raw short/long URL -> resolved dict (avoids re-expanding).
@@ -894,7 +922,14 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if resolved["affiliate_url"] in cleared:  # admin cleared this one
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
-            continue   # already in (or was in) another list — keep this list unique
+            continue   # already on an earlier tab this run — keep tabs unique
+        # reference-source STICKY ban: hidden forever once it appeared there, until our
+        # source re-publishes it with a date NEWER than the ban.
+        if banned is not None and resolved["asin"] in banned:
+            src_date = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"], "")
+            if not _dt_after(src_date, banned[resolved["asin"]]):
+                continue                               # still banned
+            banned.pop(resolved["asin"], None)         # source re-published -> allow back
 
         lid = resolved["id"]
         if lid in seen_ids:
