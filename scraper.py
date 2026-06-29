@@ -677,6 +677,9 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
             if not m or m.group(1) in seen:
                 continue
             seen.add(m.group(1))
+            if len(out) < 4:   # DIAG: inspect coupon-bearing fields (field names only)
+                cps = {k: r[k] for k in r if re.search(r"cup|coup|code|voucher|promo|descuent|ahorr", k, re.I)}
+                log.info("mi-dbg keys=%s coupons=%s", sorted(r.keys()), cps)
             out.append((f"https://www.amazon.es/dp/{m.group(1)}",
                         r.get("created_at") or "", "", False, _clean_name(r.get("name", ""))))
     log.info("mi: %d amazon.es deals", len(out))
@@ -720,6 +723,10 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
             if date and not date.endswith(("Z", "+00:00")):
                 date += "+00:00"
             name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
+            if len(out) < 6:   # DIAG: is there a coupon code in the post text?
+                cm = re.search(r"(?:c[oó]digo|cup[oó]n|coupon|promo)\D{0,12}([A-Z0-9]{4,15})", content)
+                if cm:
+                    log.info("titas-dbg coupon=%s", cm.group(1))
             out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
     log.info("titas: %d amazon.es deals", len(out))
     return out
