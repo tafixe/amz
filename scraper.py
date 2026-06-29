@@ -398,25 +398,9 @@ def _clean_name(s: str, limit: int = 90) -> str:
 # UPPERCASE alphanumerics so plain words don't match. Clip-on-page coupons (no
 # code) are not captured here — there is nothing to type. Returns "" if none.
 _COUPON_CODE_RE = re.compile(
-    r"(?i:c[oó]digo|c[oó]d|cup[oó]n|cupon|coupon|code|promo)[^A-Za-z0-9]{0,15}([A-Z0-9]{5,15})\b")
+    r"(?i:c[oó]digo|c[oó]d|cup[oó]n|cupon|cup[aã]o|cupao|cupom|coupon|code|promo)"
+    r"[^A-Za-z0-9]{0,15}([A-Z0-9]{5,15})\b")
 _COUPON_STOPWORDS = {"AMAZON", "PRIME", "DESCUENTO", "OFERTA", "PRODUCTO", "CODIGO", "CUPON"}
-
-def _coupon_mentions(text: str, limit: int = 3) -> list[str]:
-    """DIAG: sanitized snippets around any coupon keyword, to see how a source
-    writes coupons. URLs / dotted tokens stripped so no site name leaks."""
-    if not text:
-        return []
-    plain = re.sub(r"<[^>]+>", " ", text)
-    plain = re.sub(r"https?://\S+|www\.\S+|\S+\.\S+/\S*", " ", plain)   # kill links/domains
-    plain = re.sub(r"\s+", " ", plain)
-    out = []
-    for m in re.finditer(r"(?i)cup[oóa]n|cupom|cup[aã]o|coupon|c[oó]digo", plain):
-        a = max(0, m.start() - 8)
-        out.append(plain[a:m.start() + 42].strip())
-        if len(out) >= limit:
-            break
-    return out
-
 
 def extract_coupon_code(text: str) -> str:
     """Pull a checkout coupon code out of free text/HTML, or '' if none found."""
@@ -757,8 +741,6 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
             if date and not date.endswith(("Z", "+00:00")):
                 date += "+00:00"
             name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
-            for snip in _coupon_mentions(content + " " + name):   # DIAG
-                log.info("cup-dbg [titas]: %s", snip)
             out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, extract_coupon_code(content), False, name))
     log.info("titas: %d amazon.es deals", len(out))
     return out
@@ -938,8 +920,6 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                 if cpn:
                     for u in urls:
                         raw_to_coupon.setdefault(u, cpn)
-                for snip in _coupon_mentions(post["html"]):   # DIAG
-                    log.info("cup-dbg [%s tg]: %s", state_key, snip)
 
     dated = [dt for dt, _ in posts if dt]
     window_start = (max(dated) - timedelta(hours=AMAZON_BATCH_WINDOW_HOURS)) if dated else None
@@ -961,8 +941,6 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         try:
             resp = requests.get(page, timeout=30, headers=_BROWSER_HEADERS)
             resp.raise_for_status()
-            for snip in _coupon_mentions(resp.text):   # DIAG
-                log.info("cup-dbg [%s web]: %s", state_key, snip)
             for raw in extract_amazon_urls(resp.text):
                 if raw not in seen_raw:
                     seen_raw.add(raw)
