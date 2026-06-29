@@ -507,9 +507,12 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
                 if c is not None and (current is None or c < current):
                     current = c
             low = bool(lowest and current and current <= lowest * (1 + KEEPA_LOW_MARGIN) + 1)
+            # Sales rank (csv 3) — popularity; lower = more popular, -1 = unranked.
+            rank = cur_arr[3] if (len(cur_arr) > 3 and isinstance(cur_arr[3], int) and cur_arr[3] > 0) else None
             low_cache[a] = {"low": low, "checked": now.isoformat(),
                             "cat": p.get("rootCategory"),
-                            "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, "")}
+                            "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, ""),
+                            "rank": rank}
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
@@ -680,6 +683,48 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
+    """Source is WordPress; its category pages are JS-rendered, so use the REST
+    API. Each post's content has the Amazon ASIN (?asin=ASIN); title is the name.
+    Returns (amazon_url, iso_date, "", low, name) — fetched via proxy, fallback direct."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    seen = set()
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    proxy = SOURCES.get("titas_proxy", "")
+    direct = SOURCES.get("titas_direct", "")
+    if not proxy and not direct:
+        return out
+    for page in (1, 2):
+        posts = None
+        srcs = [s for s in (f"{proxy}?page={page}" if proxy else "",
+                            f"{direct}{page}" if direct else "") if s]
+        for src in srcs:
+            try:
+                r = sess.get(src, timeout=40)
+                if r.status_code == 200:
+                    posts = r.json()
+                    if posts:
+                        break
+            except (requests.RequestException, ValueError) as e:
+                log.warning("titas fetch %s: %s", src, e)
+        if not posts:
+            break
+        for p in posts:
+            content = (p.get("content", {}) or {}).get("rendered", "")
+            m = re.search(r"[?&]asin=([A-Z0-9]{10})", content)
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            date = p.get("date_gmt") or p.get("date") or ""
+            if date and not date.endswith(("Z", "+00:00")):
+                date += "+00:00"
+            name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
+            out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
+    log.info("titas: %d amazon.es deals", len(out))
+    return out
+
+
 def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
     """Deals from a price-tracker's RSS feeds (highlights + popular + top drops;
     the feeds escape the site's bot challenge). Each item's /product/<ASIN> link
@@ -772,16 +817,19 @@ def scrape_amazon_links():
         ([], [], get_mi_items, "data/mi.json"),
         ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
         ([], [], get_camel_items, "data/camel.json"),
+        ([], [], get_titas_items, "data/titas.json"),
     ]:
         # Exclude ASINs already shown on an earlier tab this run (cross-tab
         # uniqueness). The reference-source sticky-ban is applied via `banned`.
         exclude = set(claimed)
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
-                                "data/cholloes.json", "data/camel.json")
+                                "data/cholloes.json", "data/camel.json", "data/titas.json")
+        # TITAS: only top-1000 most-popular AND at all-time low.
+        top_rank = 1000 if state_key == "data/titas.json" else None
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
-                                price_budget, banned)
+                                price_budget, banned, top_rank)
         for l in last.get("links", []):
             a = _asin_from_url(l["url"])
             if a:
@@ -827,7 +875,7 @@ def _dt_after(a, b) -> bool:
     return bool(da and db and da > db)
 
 
-def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None):
+def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None, top_rank=None):
     """Build the freshest batch of clean affiliate links for one source list."""
     existing = r2_get_amazon_links(state_key)
     # Resolution cache: raw short/long URL -> resolved dict (avoids re-expanding).
@@ -993,6 +1041,16 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if BOOK_CATS:
             links = [l for l in links
                      if (low_cache.get(_asin_from_url(l["url"])) or {}).get("cat") not in BOOK_CATS]
+        # Curated tab: keep only all-time lows that are also in the top-N most
+        # popular (Keepa sales rank <= top_rank). Needs the ASIN to be priced.
+        if top_rank:
+            kept = []
+            for l in links:
+                e = (low_cache or {}).get(_asin_from_url(l["url"])) or {}
+                rk = e.get("rank")
+                if e.get("low") and isinstance(rk, int) and 0 < rk <= top_rank:
+                    kept.append(l)
+            links = kept
 
     # Last resort: fill any still-nameless link from Keepa (paid). Each ASIN is
     # queried at most once ever (tracked in keepa_tried) and capped per run, so
@@ -1134,6 +1192,7 @@ const TABS = [
   { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
+  { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
   { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
 ];
