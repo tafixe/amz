@@ -1035,8 +1035,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             name_map.setdefault(asin, name)
         if all_asins is not None and asin:
             all_asins.add(asin)   # for the transversal all-time-low refresh
-        coupon = raw_to_coupon.get(raw_url, "")
-        if coupon:
+        # Coupon code: structured/Telegram-body first, else always scan the product
+        # name itself (cupão/código/cupón/coupon + code) so no source is missed.
+        coupon = raw_to_coupon.get(raw_url, "") or extract_coupon_code(name)
+        if coupon and coupon not in name:
             name = f"{name}  \U0001F39F️ {coupon}"   # 🎟️ coupon code
         url = resolved["affiliate_url"]
         link_date = raw_to_date.get(raw_url, "")   # Telegram post date when available
