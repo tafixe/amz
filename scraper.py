@@ -393,6 +393,26 @@ def _clean_name(s: str, limit: int = 90) -> str:
     return s
 
 
+# A redeemable coupon/promo CODE the user types at checkout, e.g.
+# "código: BANG20" / "con el cupón ABC1234". Anchored to a keyword and limited to
+# UPPERCASE alphanumerics so plain words don't match. Clip-on-page coupons (no
+# code) are not captured here — there is nothing to type. Returns "" if none.
+_COUPON_CODE_RE = re.compile(
+    r"(?i:c[oó]digo|c[oó]d|cup[oó]n|cupon|coupon|code|promo)[^A-Za-z0-9]{0,15}([A-Z0-9]{5,15})\b")
+_COUPON_STOPWORDS = {"AMAZON", "PRIME", "DESCUENTO", "OFERTA", "PRODUCTO", "CODIGO", "CUPON"}
+
+def extract_coupon_code(text: str) -> str:
+    """Pull a checkout coupon code out of free text/HTML, or '' if none found."""
+    if not text:
+        return ""
+    plain = re.sub(r"<[^>]+>", " ", text)        # drop HTML tags so adjacency holds
+    for m in _COUPON_CODE_RE.finditer(plain):
+        code = m.group(1)
+        if any(ch.isdigit() for ch in code) and code not in _COUPON_STOPWORDS:
+            return code                          # require a digit -> real code, not a word
+    return ""
+
+
 def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     """Scan a deals site's home + /populares. Merchant links hide behind /visit/
     redirects, so follow them and keep only the ones landing on amazon.es. Use
@@ -677,9 +697,6 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
             if not m or m.group(1) in seen:
                 continue
             seen.add(m.group(1))
-            if len(out) < 4:   # DIAG: inspect coupon-bearing fields (field names only)
-                cps = {k: r[k] for k in r if re.search(r"cup|coup|code|voucher|promo|descuent|ahorr", k, re.I)}
-                log.info("mi-dbg keys=%s coupons=%s", sorted(r.keys()), cps)
             out.append((f"https://www.amazon.es/dp/{m.group(1)}",
                         r.get("created_at") or "", "", False, _clean_name(r.get("name", ""))))
     log.info("mi: %d amazon.es deals", len(out))
@@ -723,11 +740,7 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
             if date and not date.endswith(("Z", "+00:00")):
                 date += "+00:00"
             name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
-            if len(out) < 6:   # DIAG: is there a coupon code in the post text?
-                cm = re.search(r"(?:c[oó]digo|cup[oó]n|coupon|promo)\D{0,12}([A-Z0-9]{4,15})", content)
-                if cm:
-                    log.info("titas-dbg coupon=%s", cm.group(1))
-            out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
+            out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, extract_coupon_code(content), False, name))
     log.info("titas: %d amazon.es deals", len(out))
     return out
 
@@ -895,12 +908,17 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
 
     # Collect posts that contain Amazon links, with their publish time, so we can
     # keep only the most recent batch (posts within N hours of the newest one).
+    raw_to_coupon: dict[str, str] = {}   # raw url -> checkout coupon code (if any)
     posts: list[tuple[datetime | None, list[str]]] = []
     for channel in channels:
         for post in get_telegram_link_posts(channel):
             urls = extract_amazon_urls(post["html"])
             if urls:
                 posts.append((post["dt"], urls))
+                cpn = extract_coupon_code(post["html"])   # code is in the post body
+                if cpn:
+                    for u in urls:
+                        raw_to_coupon.setdefault(u, cpn)
 
     dated = [dt for dt, _ in posts if dt]
     window_start = (max(dated) - timedelta(hours=AMAZON_BATCH_WINDOW_HOURS)) if dated else None
@@ -929,8 +947,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                     raw_to_date[raw] = ""
         except requests.RequestException as e:
             log.error("Failed to fetch web page %s: %s", page, e)
-    # Custom provider returns (url, date, coupon[, low]) tuples (chollo/dez).
-    raw_to_coupon: dict[str, str] = {}
+    # Custom provider returns (url, date, coupon[, low]) tuples (chollo/dez/titas).
     raw_to_low: dict[str, bool] = {}
     raw_to_name: dict[str, str] = {}   # name supplied by the source (for /dp/ASIN links)
     if items_fn:
@@ -952,7 +969,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         except Exception as e:
             log.error("items provider failed for %s: %s", state_key, e)
 
-    log.info("[%s] latest batch: %d unique raw Amazon URLs", state_key, len(candidates))
+    log.info("[%s] latest batch: %d unique raw Amazon URLs (%d with coupon code)",
+             state_key, len(candidates), len(raw_to_coupon))
 
     now_iso = datetime.now(timezone.utc).isoformat()
     resolved_this_run = 0
