@@ -1037,15 +1037,16 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             all_asins.add(asin)   # for the transversal all-time-low refresh
         # Coupon code: structured/Telegram-body first, else always scan the product
         # name itself (cupão/código/cupón/coupon + code) so no source is missed.
+        # Stored as its own field -> the UI shows a click-to-copy chip.
         coupon = raw_to_coupon.get(raw_url, "") or extract_coupon_code(name)
-        if coupon and coupon not in name:
-            name = f"{name}  \U0001F39F️ {coupon}"   # 🎟️ coupon code
         url = resolved["affiliate_url"]
         link_date = raw_to_date.get(raw_url, "")   # Telegram post date when available
         if not link_date:                          # web source: use first-seen date
             link_date = seen.get(url) or now_iso
             seen[url] = link_date
         link = {"name": name, "url": url, "date": link_date}
+        if coupon:
+            link["coupon"] = coupon
         if raw_to_low.get(raw_url):
             link["low"] = True   # provider already says it's an all-time low
         links.append(link)
@@ -1183,6 +1184,11 @@ def generate_amazon_html() -> str:
   li .name { flex:1; word-break:break-word; }
   li .tag { color:var(--muted); font-size:11px; flex-shrink:0; white-space:nowrap; }
   li .tag.disc { color:var(--brand); font-weight:700; }
+  li .cpn { flex-shrink:0; margin-left:8px; border:1px solid var(--brand); color:var(--brand);
+    background:transparent; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700;
+    cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; }
+  li .cpn:hover { background:rgba(255,153,0,.14); }
+  li .cpn.ok { border-color:var(--green); color:var(--green); }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
@@ -1247,7 +1253,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1323,11 +1329,30 @@ function render(){
     const tag = (l.low && l.minp)
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
       : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '');
+    // Click-to-copy coupon chip (stops the row link from opening).
+    const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
     return '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      '<span class="name">'+dot+esc(l.name)+'</span>'+ tag +
+      '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
   }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
+}
+
+function copyCoupon(ev, el){
+  ev.preventDefault(); ev.stopPropagation();   // don't open the Amazon link
+  const code = el.dataset.code;
+  const restore = () => { el.textContent = '🎟️ ' + code; el.classList.remove('ok'); };
+  const ok = () => { el.classList.add('ok'); el.textContent = 'copiado ✓'; setTimeout(restore, 1200); };
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(code).then(ok, () => fallbackCopy(code, ok));
+  else fallbackCopy(code, ok);
+}
+function fallbackCopy(text, cb){
+  const t = document.createElement('textarea');
+  t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+  document.body.appendChild(t); t.focus(); t.select();
+  try { document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(t); if (cb) cb();
 }
 
 function applyDots(){
