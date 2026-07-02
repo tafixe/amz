@@ -1141,7 +1141,7 @@ def r2_upload_amazon_html():
 
 
 def generate_amazon_html() -> str:
-    """Tabbed dashboard: Telegram batch + two static lists (PD26 ES, Top 100 EU5).
+    """Tabbed dashboard, one live tab per source, with a universal search bar.
     Same clickable row format; tap a row to open the affiliate link (and hide it)."""
     return """<!DOCTYPE html>
 <html lang="pt">
@@ -1211,7 +1211,7 @@ def generate_amazon_html() -> str:
     <button class="clear-btn" id="clearBtn" title="Limpar esta lista">Limpar tudo</button>
   </div>
   <div class="tabs" id="tabs"></div>
-  <input class="search" id="search" placeholder="Pesquisar produto..." style="display:none">
+  <input class="search" id="search" placeholder="Pesquisar produto...">
 </header>
 <ul id="list"></ul>
 <button class="more" id="moreBtn" style="display:none">Mostrar mais</button>
@@ -1227,8 +1227,6 @@ const TABS = [
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
-  { id:"pd26", label:"PD26 ES",      src:"/data/pd26_es.json",      kind:"static", search:true },
-  { id:"es",   label:"Top 100 ES",   src:"/data/top100_es.json",    kind:"static" },
 ];
 const PAGE = 200;
 let current = TABS[0];
@@ -1294,7 +1292,7 @@ async function loadTab(tab){
 function visibleItems(){
   const h = hiddenSet(current.id);
   let items = (cache[current.id]||[]).filter(l => !h.has(l.url) && (current.kind!=="tg" || !serverHidden.has(l.url)));
-  if (current.search && query) {
+  if (query) {   // search works on every tab
     const q = query.toLowerCase();
     items = items.filter(l => (l.name||"").toLowerCase().includes(q));
   }
@@ -1315,7 +1313,6 @@ function render(){
   updateSortBtn();
   const items = visibleItems();
   document.getElementById("meta").textContent = items.length + " links";
-  document.getElementById("search").style.display = current.search ? "" : "none";
   const box = document.getElementById("list");
   if (!items.length) { box.innerHTML = '<div class="empty">Sem links.</div>';
     document.getElementById("moreBtn").style.display="none"; return; }

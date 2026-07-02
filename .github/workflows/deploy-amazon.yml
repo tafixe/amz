@@ -35,15 +35,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler@3 deploy
 
-      - name: Upload static link lists to the bucket (if present locally)
-        working-directory: worker-amazon
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          [ -f data/pd26_es.json ] && npx --yes wrangler@3 r2 object put "ofertas-amazon/data/pd26_es.json" --file data/pd26_es.json --content-type "application/json" || echo "pd26_es.json not in repo — keeping the copy already in R2"
-          [ -f data/top100_es.json ] && npx --yes wrangler@3 r2 object put "ofertas-amazon/data/top100_es.json" --file data/top100_es.json --content-type "application/json" || echo "top100_es.json not in repo — keeping the copy already in R2"
-
       - name: Configure worker secrets (password, proxies, promo link)
         working-directory: worker-amazon
         env:
