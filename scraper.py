@@ -103,9 +103,9 @@ KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"
 # All-time-low flag is transversal to every tab; cap how many ASINs we (re)price
 # per run so token use stays well within budget (each ~1 token, cached 24h).
 KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "40"))
-# Flag as all-time low when the current price is within this margin of the
-# historical minimum (0.015 = 1.5%).
-KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.01"))
+# Flag as all-time low when current <= lowest * (1 + margin). 0.005 = 0.5%,
+# per the Keepa minimum-detection module spec.
+KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.005"))
 # Keepa root categories to exclude from every tab (no books). 599364031 = Libros
 # (amazon.es). Set via secret BOOK_CATS_JSON to add more (e.g. Kindle store).
 BOOK_CATS = set()
@@ -527,7 +527,7 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
                     lowest, lowtype = m, i
                 if c is not None and (current is None or c < current):
                     current = c
-            low = bool(lowest and current and current <= lowest * (1 + KEEPA_LOW_MARGIN) + 1)
+            low = bool(lowest and current and current <= lowest * (1 + KEEPA_LOW_MARGIN))
             # Sales rank (csv 3) — popularity; lower = more popular, -1 = unranked.
             rank = cur_arr[3] if (len(cur_arr) > 3 and isinstance(cur_arr[3], int) and cur_arr[3] > 0) else None
             low_cache[a] = {"low": low, "checked": now.isoformat(),
