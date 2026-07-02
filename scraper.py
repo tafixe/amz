@@ -1189,6 +1189,8 @@ def generate_amazon_html() -> str:
     cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; }
   li .cpn:hover { background:rgba(255,153,0,.14); }
   li .cpn.ok { border-color:var(--green); color:var(--green); }
+  li .tag.srctab { border:1px solid var(--border); border-radius:6px; padding:1px 7px;
+    margin-left:8px; color:var(--muted); font-weight:600; }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
@@ -1211,7 +1213,7 @@ def generate_amazon_html() -> str:
     <button class="clear-btn" id="clearBtn" title="Limpar esta lista">Limpar tudo</button>
   </div>
   <div class="tabs" id="tabs"></div>
-  <input class="search" id="search" placeholder="Pesquisar produto...">
+  <input class="search" id="search" placeholder="Pesquisar em todas as tabs...">
 </header>
 <ul id="list"></ul>
 <button class="more" id="moreBtn" style="display:none">Mostrar mais</button>
@@ -1290,12 +1292,21 @@ async function loadTab(tab){
 }
 
 function visibleItems(){
+  if (query) {   // transversal search: matches from EVERY tab, tagged with origin
+    const q = query.toLowerCase(), seenUrl = new Set(), out = [];
+    for (const t of TABS) {
+      const th = hiddenSet(t.id);
+      for (const l of (cache[t.id]||[])) {
+        if (th.has(l.url) || serverHidden.has(l.url) || seenUrl.has(l.url)) continue;
+        if (!(l.name||"").toLowerCase().includes(q)) continue;
+        seenUrl.add(l.url);
+        out.push(Object.assign({}, l, { srcTab: t.label }));
+      }
+    }
+    return out;
+  }
   const h = hiddenSet(current.id);
   let items = (cache[current.id]||[]).filter(l => !h.has(l.url) && (current.kind!=="tg" || !serverHidden.has(l.url)));
-  if (query) {   // search works on every tab
-    const q = query.toLowerCase();
-    items = items.filter(l => (l.name||"").toLowerCase().includes(q));
-  }
   if (current.id === "tg" && sortByDate) {  // newest first, by post date
     items = items.slice().sort((a, b) => (b.date||"").localeCompare(a.date||""));
   }
@@ -1328,8 +1339,10 @@ function render(){
       : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '');
     // Click-to-copy coupon chip (stops the row link from opening).
     const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
+    // During transversal search, show which tab the result came from.
+    const src = l.srcTab ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
     return '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + tag +
+      '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
   }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
