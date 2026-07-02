@@ -414,55 +414,79 @@ def extract_coupon_code(text: str) -> str:
     return ""
 
 
+# ASIN map for the community deals site: thread id -> ASIN ("" = deal page
+# checked, no Amazon link found). Persisted in R2 so each page is fetched once.
+CHOLLO_MAP_KEY = "data/chollo_map.json"
+CHOLLO_MAX_DEAL_FETCH = int(os.environ.get("CHOLLO_MAX_DEAL_FETCH", "12"))
+
+
 def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
-    """Scan a deals site's home + /populares. Merchant links hide behind /visit/
-    redirects, so follow them and keep only the ones landing on amazon.es. Use
-    each deal's publishedAt as the date, capture its coupon and title.
+    """Community deals site: read its 4 listing sections (front, most-voted,
+    rising, new). Each listing embeds one JSON object per deal (title, dates,
+    coupon, merchant). The merchant-redirect endpoint is bot-blocked (403), so
+    the ASIN comes from the deal page's embedded price-comparison widget,
+    cached forever by thread id (capped per run, paced).
     Returns (amazon_url, iso_date, coupon, low, name) tuples."""
     out: list[tuple[str, str, str, bool, str]] = []
-    seen = set()
+    base = (SOURCES.get("chollo_visit_base") or "").rstrip("/")
+    if not base:
+        return out
     sess = requests.Session()
     sess.headers.update(_BROWSER_HEADERS)
-    if not SOURCES.get("chollo_pages"):
-        return out
-    for page in SOURCES.get("chollo_pages", []):
+    threads: dict[str, dict] = {}
+    for path in ("", "/mas-votados", "/populares", "/nuevos"):
         try:
-            h = sess.get(page, timeout=30).text
+            h = sess.get(f"{base}{path}", timeout=30).text
         except requests.RequestException as e:
-            log.error("Failed to fetch %s: %s", page, e)
+            log.error("chollo list %s: %s", path or "/", e)
             continue
-        for section, tid in re.findall(r"/visit/([a-z0-9]+)/(\d+)", h):
-            if tid in seen:
-                continue
-            si = h.find(f"share-deal/{tid}")
-            if si == -1:
-                continue
-            merchant = re.search(r'"merchantUrlName":"([^"]+)"', h[si:si + 1000])
-            if not merchant or merchant.group(1) != "amazon.es":  # only amazon.es
-                continue
-            seen.add(tid)
-            before = h[max(0, si - 1500):si]
-            pm = re.findall(r'"publishedAt":(\d+)', before)
-            vm = re.findall(r'"voucherCode":"([^"]*)"', before)
-            tm = re.findall(r'"title":"([^"]+)"', before)
-            date = datetime.fromtimestamp(int(pm[-1]), timezone.utc).isoformat() if pm else ""
-            coupon = vm[-1] if vm else ""
-            name = ""
-            if tm:
-                try:  # the title is a JSON-escaped string (e.g. í)
-                    name = _clean_name(json.loads('"' + tm[-1] + '"'))
-                except Exception:
-                    name = _clean_name(tm[-1])
+        for m in re.finditer(r"data-vue3='(\{\"name\":\"ThreadMainListItemNormalizer\".*?\})'", h):
             try:
-                final = sess.get(f"{SOURCES.get('chollo_visit_base','')}/visit/{section}/{tid}",
-                                 timeout=30, allow_redirects=True).url
-            except requests.RequestException:
+                t = json.loads(html.unescape(m.group(1)))["props"]["thread"]
+            except (ValueError, KeyError, TypeError):
                 continue
-            urls = extract_amazon_urls(final)
-            if urls and "amazon.es" in final:
-                out.append((urls[0], date, coupon, False, name))
-    log.info("chollo: %d amazon.es deals (%d with coupon)",
-             len(out), sum(1 for t in out if t[2]))
+            if ((t.get("merchant") or {}).get("merchantUrlName")) != "amazon.es":
+                continue
+            tid = str(t.get("threadId") or "")
+            if tid and tid not in threads:
+                threads[tid] = t
+    state = r2_get_amazon_links(CHOLLO_MAP_KEY)
+    tmap: dict = state.get("t", {})
+    fetched = 0
+    for tid, t in threads.items():
+        asin = tmap.get(tid)
+        if asin is None:                      # deal page never looked at
+            if fetched >= CHOLLO_MAX_DEAL_FETCH:
+                continue                      # picked up on a later run
+            fetched += 1
+            try:
+                page = sess.get(f"{base}/ofertas/{t.get('titleSlug', 'x')}-{tid}",
+                                timeout=30).text
+                if len(page) < 2000:          # slug drift -> meta-refresh stub
+                    rm = re.search(r"url='?\"?(https?://[^'\">]+)", page)
+                    if rm:
+                        page = sess.get(html.unescape(rm.group(1)), timeout=30).text
+            except requests.RequestException as e:
+                log.warning("chollo deal %s: %s", tid, e)
+                continue
+            am = (re.search(r"oferta\\?/amazon_([a-zA-Z0-9]{10})\b", page)
+                  or re.search(r"amazon\.es\\?/(?:[^\"'<>\s]*?\\?/)?dp\\?/([A-Z0-9]{10})", page))
+            asin = am.group(1).upper() if am else ""
+            tmap[tid] = asin                  # "" caches the misses too
+        if not asin:
+            continue
+        ts = t.get("publishedAt")
+        date = datetime.fromtimestamp(int(ts), timezone.utc).isoformat() if ts else ""
+        # voucherCode is sometimes descriptive text ("Cupón 23% descuento"), not
+        # a code — keep only a real typable code for the click-to-copy chip.
+        voucher = extract_coupon_code("cupón " + (t.get("voucherCode") or ""))
+        out.append((f"https://www.amazon.es/dp/{asin}", date, voucher, False,
+                    _clean_name(t.get("title", ""))))
+    if len(tmap) > 20000:                     # keep the map bounded
+        tmap = dict(list(tmap.items())[-20000:])
+    r2_put_amazon_links({"t": tmap}, CHOLLO_MAP_KEY)
+    log.info("chollo: %d amazon.es deals (%d with coupon) across 4 sections, %d pages fetched",
+             len(out), sum(1 for o in out if o[2]), fetched)
     return out
 
 
