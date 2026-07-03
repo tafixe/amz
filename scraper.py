@@ -436,11 +436,12 @@ def _store_link_ok(store: str, url: str) -> bool:
 
 
 def _slug_name(url: str) -> str:
-    """Fallback product name from a URL slug."""
+    """Fallback product name from a URL slug ('' when the slug is just an id)."""
     seg = [s for s in re.sub(r"[?#].*$", "", url).split("/") if s]
     if not seg:
         return ""
-    return _clean_name(re.sub(r"[-_]+", " ", re.sub(r"\.html?$", "", seg[-1])).strip())
+    name = re.sub(r"[-_]+", " ", re.sub(r"\.html?$", "", seg[-1])).strip()
+    return "" if re.fullmatch(r"[0-9 ]*", name) else _clean_name(name)
 
 
 def store_add(store: str, url: str, date: str = "", coupon: str = "", name: str = ""):
@@ -488,7 +489,9 @@ def write_store_tabs(cleared: set):
             if prev:   # upgrade what we now know; keep the original date
                 if it.get("coupon") and not prev.get("coupon"):
                     prev["coupon"] = it["coupon"]
-                if it.get("name") and not prev.get("name"):
+                pn = prev.get("name") or ""
+                if it.get("name") and (not pn or pn.startswith("Produto ")
+                                       or re.fullmatch(r"[0-9 ]+", pn)):
                     prev["name"] = it["name"]
             else:
                 it["date"] = it.get("date") or now_iso
@@ -497,6 +500,11 @@ def write_store_tabs(cleared: set):
         links = [l for l in merged.values() if l.get("url") and l["url"] not in cleared]
         links.sort(key=lambda l: l.get("date", ""), reverse=True)
         links = links[:300]
+        label = "AliExpress" if store == "aliexpress" else "PCComponentes"
+        for l in links:
+            # id-only slug and no source gave a name yet -> generic placeholder
+            if not l.get("name") or re.fullmatch(r"[0-9 ]+", l["name"]):
+                l["name"] = f"Produto {label}"
         for l in links:                      # tidy: drop empty coupon fields
             if not l.get("coupon"):
                 l.pop("coupon", None)
