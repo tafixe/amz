@@ -438,8 +438,8 @@ def _store_link_ok(store: str, url: str) -> bool:
     return path.count("-") >= 3                       # pcc product slugs are long
 
 
-def _slug_name(url: str) -> str:
-    """Fallback product name from a URL slug ('' when the slug is just an id)."""
+def _store_slug_name(url: str) -> str:
+    """Fallback store-product name from a URL slug ('' when it is just an id)."""
     seg = [s for s in re.sub(r"[?#].*$", "", url).split("/") if s]
     if not seg:
         return ""
@@ -461,7 +461,7 @@ def store_scan_text(text: str, date: str = "", name: str = ""):
         for u in pat.findall(text):
             u = html.unescape(u).rstrip(").,;")
             if _store_link_ok(store, u):
-                store_add(store, u, date, cpn, name or _slug_name(u))
+                store_add(store, u, date, cpn, name or _store_slug_name(u))
 
 
 def _post_text_name(html_text: str) -> str:
@@ -1036,7 +1036,8 @@ def scrape_amazon_links():
     # so the same deal shows a real name everywhere. Persisted across runs.
     NAMES_KEY = "data/names_by_asin.json"
     _nm = r2_get_amazon_links(NAMES_KEY)
-    name_map = _nm.get("n", {})
+    # Scrub poisoned entries (name == ASIN counts as no name).
+    name_map = {a: n for a, n in _nm.get("n", {}).items() if n and n != a}
     keepa_tried = set(_nm.get("tried", []))   # ASINs already looked up on Keepa
 
     # Transversal all-time-low cache (per ASIN, 24h TTL), shared by every tab.
@@ -1129,7 +1130,9 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Resolution cache: raw short/long URL -> resolved dict (avoids re-expanding).
     cache = existing.get("cache", {})
     # Persistent real-title cache: link id -> product name (filled over time).
-    names = existing.get("names", {})
+    # A value equal to the id's ASIN is a poisoned entry, not a name.
+    names = {k: v for k, v in existing.get("names", {}).items()
+             if v and v != k.split("-")[0]}
     # First time we saw each URL (used as the date for web sources like Deluxe,
     # whose pages report "now" as the publish date).
     seen = existing.get("seen", {})
@@ -1224,6 +1227,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             cache[raw_url] = resolved  # cache hits and misses (None)
         if resolved is None:  # not a product link
             continue
+        # Self-heal: a name that is just the ASIN counts as no name at all
+        # (repairs cached entries poisoned by the old slug fallback too).
+        if resolved.get("name", "") == resolved.get("asin"):
+            resolved["name"] = f"Produto {resolved['asin']}"
         if resolved["affiliate_url"] in cleared:  # admin cleared this one
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
@@ -1262,7 +1269,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                     names[lid] = fetched
                     name = fetched
         # Feed any real product name back into the shared map for other tabs.
-        if name_map is not None and asin and not name.startswith("Produto "):
+        if name_map is not None and asin and name != asin and not name.startswith("Produto "):
             name_map.setdefault(asin, name)
         if all_asins is not None and asin:
             all_asins.add(asin)   # for the transversal all-time-low refresh
