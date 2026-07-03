@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 try:
@@ -428,7 +429,9 @@ _STORE_PATTERNS = (
 
 
 def _store_link_ok(store: str, url: str) -> bool:
-    """Keep product-looking links only (not category/banner pages)."""
+    """Keep product-looking links only (not category/banner/host-only pages)."""
+    if re.match(r"https?://[^/]+/*$", url):           # bare domain -> junk
+        return False
     if store == "aliexpress":
         return "/item/" in url or "s.click." in url   # product page or affiliate short link
     path = url.split("/", 3)[-1] if url.count("/") >= 3 else ""
@@ -468,11 +471,54 @@ def _post_text_name(html_text: str) -> str:
     return _clean_name(re.sub(r"\s+", " ", t).strip()[:90])
 
 
+# aliexpress.us item ids are the global (.com/.es) id plus this fixed offset,
+# so the same product gets one canonical key whichever domain a source used.
+_ALI_US_ID_OFFSET = 2251799813685248
+
+
 def _store_dedupe_key(url: str) -> str:
     m = re.search(r"aliexpress\.[a-z.]+/item/(\d+)", url)
     if m:
-        return "ali:" + m.group(1)
+        iid = int(m.group(1))
+        if iid >= _ALI_US_ID_OFFSET:
+            iid -= _ALI_US_ID_OFFSET
+        return f"ali:{iid}"
     return re.sub(r"[?#].*$", "", url).rstrip("/")
+
+
+def _name_tokens(name: str) -> list:
+    """Accent-folded lowercase word tokens of a product name (for fuzzy dedupe).
+    Metadata tails after '|' (price, condition) are not part of the name."""
+    s = (name or "").split("|", 1)[0]
+    s = unicodedata.normalize("NFKD", s.lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.findall(r"[a-z0-9]+", s)
+
+
+def _same_product(a: list, b: list) -> bool:
+    """Two names are the same product when they agree on the first two words and
+    share >=70% of their vocabulary. Conservative on purpose: 'chollo pack 4x
+    aceite...' vs 'chollo aceite...' (different deals) stays separate."""
+    if len(a) < 2 or len(b) < 2 or a[:2] != b[:2]:
+        return False
+    inter = len(set(a) & set(b))
+    union = len(set(a) | set(b))
+    return union > 0 and inter / union >= 0.7
+
+
+def _store_row_score(store: str, l: dict) -> int:
+    """Which duplicate to keep: direct store product link beats a deal-page
+    link, then having a coupon, then having a real name."""
+    s = 0
+    url = l.get("url", "")
+    if (store == "aliexpress" and re.search(r"aliexpress\.[a-z.]+/item/", url)) or \
+       (store == "pcc" and "pccomponentes." in url):
+        s += 4
+    if l.get("coupon"):
+        s += 2
+    if l.get("name") and not l["name"].startswith("Produto "):
+        s += 1
+    return s
 
 
 def write_store_tabs(cleared: set):
@@ -498,6 +544,26 @@ def write_store_tabs(cleared: set):
                 merged[k] = it
                 fresh += 1
         links = [l for l in merged.values() if l.get("url") and l["url"] not in cleared]
+        # Collapse cross-source duplicates of the same product (direct link vs
+        # deal page vs second short link). Best row wins; coupon and freshest
+        # date are inherited from the dropped copies.
+        kept: list = []
+        for l in sorted(links, key=lambda x: _store_row_score(store, x), reverse=True):
+            toks = _name_tokens(l.get("name", ""))
+            dup = None
+            if not (l.get("name") or "").startswith("Produto "):   # placeholders: URL dedupe only
+                dup = next((k2 for k2 in kept if _same_product(toks, k2["_t"])), None)
+            if dup is not None:
+                if l.get("coupon") and not dup.get("coupon"):
+                    dup["coupon"] = l["coupon"]
+                if (l.get("date") or "") > (dup.get("date") or ""):
+                    dup["date"] = l["date"]
+                continue
+            l["_t"] = toks
+            kept.append(l)
+        for l in kept:
+            l.pop("_t", None)
+        links = kept
         links.sort(key=lambda l: l.get("date", ""), reverse=True)
         links = links[:300]
         label = "AliExpress" if store == "aliexpress" else "PCComponentes"
