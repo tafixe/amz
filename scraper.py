@@ -414,6 +414,96 @@ def extract_coupon_code(text: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Non-Amazon store tabs (AliExpress / PCComponentes): a transversal side
+# collector. Every source we already fetch also reports any direct product
+# link for these stores; everything lands together in one tab per store.
+# ---------------------------------------------------------------------------
+STORE_TAB_KEYS = {"aliexpress": "data/aliexpress.json", "pcc": "data/pccomponentes.json"}
+_STORE_ITEMS: dict = {"aliexpress": [], "pcc": []}   # reset at the start of each run
+_STORE_PATTERNS = (
+    ("aliexpress", re.compile(r"https?://(?:s\.click\.|[a-z]{2}\.|www\.)?aliexpress\.[a-z.]{2,6}/[^\s\"'<>\\]+", re.I)),
+    ("pcc", re.compile(r"https?://(?:www\.)?pccomponentes\.(?:com|pt)/[^\s\"'<>\\]+", re.I)),
+)
+
+
+def _store_link_ok(store: str, url: str) -> bool:
+    """Keep product-looking links only (not category/banner pages)."""
+    if store == "aliexpress":
+        return "/item/" in url or "s.click." in url   # product page or affiliate short link
+    path = url.split("/", 3)[-1] if url.count("/") >= 3 else ""
+    return path.count("-") >= 3                       # pcc product slugs are long
+
+
+def _slug_name(url: str) -> str:
+    """Fallback product name from a URL slug."""
+    seg = [s for s in re.sub(r"[?#].*$", "", url).split("/") if s]
+    if not seg:
+        return ""
+    return _clean_name(re.sub(r"[-_]+", " ", re.sub(r"\.html?$", "", seg[-1])).strip())
+
+
+def store_add(store: str, url: str, date: str = "", coupon: str = "", name: str = ""):
+    _STORE_ITEMS[store].append({"url": url, "date": date or "",
+                                "coupon": coupon or "", "name": name or ""})
+
+
+def store_scan_text(text: str, date: str = "", name: str = ""):
+    """Side collector: pull direct store product links out of any source text."""
+    if not text:
+        return
+    cpn = extract_coupon_code(text)
+    for store, pat in _STORE_PATTERNS:
+        for u in pat.findall(text):
+            u = html.unescape(u).rstrip(").,;")
+            if _store_link_ok(store, u):
+                store_add(store, u, date, cpn, name or _slug_name(u))
+
+
+def _post_text_name(html_text: str) -> str:
+    """Product name from a Telegram post body (tags and links stripped)."""
+    t = re.sub(r"<[^>]+>", " ", html_text or "")
+    t = re.sub(r"https?://\S+", " ", t)
+    return _clean_name(re.sub(r"\s+", " ", t).strip()[:90])
+
+
+def _store_dedupe_key(url: str) -> str:
+    m = re.search(r"aliexpress\.[a-z.]+/item/(\d+)", url)
+    if m:
+        return "ali:" + m.group(1)
+    return re.sub(r"[?#].*$", "", url).rstrip("/")
+
+
+def write_store_tabs(cleared: set):
+    """Merge this run's collected store links into each tab's state in R2:
+    dedupe by product, keep first-seen dates, drop opened/cleared, newest first."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for store, key in STORE_TAB_KEYS.items():
+        state = r2_get_amazon_links(key)
+        merged = {_store_dedupe_key(l.get("url", "")): l for l in state.get("links", [])}
+        fresh = 0
+        for it in _STORE_ITEMS.get(store) or []:
+            k = _store_dedupe_key(it["url"])
+            prev = merged.get(k)
+            if prev:   # upgrade what we now know; keep the original date
+                if it.get("coupon") and not prev.get("coupon"):
+                    prev["coupon"] = it["coupon"]
+                if it.get("name") and not prev.get("name"):
+                    prev["name"] = it["name"]
+            else:
+                it["date"] = it.get("date") or now_iso
+                merged[k] = it
+                fresh += 1
+        links = [l for l in merged.values() if l.get("url") and l["url"] not in cleared]
+        links.sort(key=lambda l: l.get("date", ""), reverse=True)
+        links = links[:300]
+        for l in links:                      # tidy: drop empty coupon fields
+            if not l.get("coupon"):
+                l.pop("coupon", None)
+        r2_put_amazon_links({"updated": now_iso, "links": links}, key)
+        log.info("[%s] store tab: %d links (%d new this run)", key, len(links), fresh)
+
+
 # ASIN map for the community deals site: thread id -> ASIN ("" = deal page
 # checked, no Amazon link found). Persisted in R2 so each page is fetched once.
 CHOLLO_MAP_KEY = "data/chollo_map.json"
@@ -445,10 +535,24 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
                 t = json.loads(html.unescape(m.group(1)))["props"]["thread"]
             except (ValueError, KeyError, TypeError):
                 continue
-            if ((t.get("merchant") or {}).get("merchantUrlName")) != "amazon.es":
-                continue
+            merchant = (t.get("merchant") or {}).get("merchantUrlName") or ""
             tid = str(t.get("threadId") or "")
-            if tid and tid not in threads:
+            if not tid:
+                continue
+            # Other tracked stores: merchant link is unreachable (blocked
+            # redirect), so the row opens the deal page itself.
+            st = {"es.aliexpress.com": "aliexpress", "aliexpress.com": "aliexpress",
+                  "pccomponentes.com": "pcc", "www.pccomponentes.com": "pcc"}.get(merchant)
+            if st:
+                ts0 = t.get("publishedAt")
+                store_add(st, f"{base}/ofertas/{t.get('titleSlug', 'x')}-{tid}",
+                          datetime.fromtimestamp(int(ts0), timezone.utc).isoformat() if ts0 else "",
+                          extract_coupon_code("cupón " + (t.get("voucherCode") or "")),
+                          _clean_name(t.get("title", "")))
+                continue
+            if merchant != "amazon.es":
+                continue
+            if tid not in threads:
                 threads[tid] = t
     state = r2_get_amazon_links(CHOLLO_MAP_KEY)
     tmap: dict = state.get("t", {})
@@ -708,6 +812,23 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
             break
         for r in results:
             stores = r.get("store", []) or []
+            sdesc = " ".join(((s.get("slug") or "") + " " + (s.get("name") or "")).lower()
+                             for s in stores)
+            target = ("aliexpress" if "aliexpress" in sdesc
+                      else "pcc" if "pccomponentes" in sdesc else None)
+            if target:   # tracked non-Amazon store -> the transversal store tab
+                ou = r.get("offer_url", "")
+                if ou and resolved < 60:
+                    try:
+                        final = sess.get(ou, timeout=20, allow_redirects=True).url
+                        resolved += 1
+                    except requests.RequestException:
+                        continue
+                    want = r"aliexpress\." if target == "aliexpress" else r"pccomponentes\."
+                    if re.search(want, final):
+                        store_add(target, final, r.get("created_at") or "", "",
+                                  _clean_name(r.get("name", "")))
+                continue
             if not any(s.get("slug") == "amazon-es" or "amazon" in (s.get("name", "").lower()) for s in stores):
                 continue   # Amazon.es only
             ou = r.get("offer_url", "")
@@ -757,6 +878,9 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
             break
         for p in posts:
             content = (p.get("content", {}) or {}).get("rendered", "")
+            store_scan_text(content,
+                            (p.get("date_gmt") or "") + "+00:00" if p.get("date_gmt") else "",
+                            _clean_name((p.get("title", {}) or {}).get("rendered", "")))
             m = re.search(r"[?&]asin=([A-Z0-9]{10})", content)
             if not m or m.group(1) in seen:
                 continue
@@ -817,6 +941,8 @@ def scrape_amazon_links():
         log.warning("AMAZON_AFFILIATE_TAG is still the placeholder "
                     "— set the AMAZON_AFFILIATE_TAG secret to your real tag.")
     cleared = r2_get_amazon_cleared()  # admin-cleared / opened URLs, excluded from all lists
+    for v in _STORE_ITEMS.values():    # fresh transversal store collector this run
+        v.clear()
 
     # Cross-check EVERY list against the reference source. Any ASIN seen there in
     # the last REFERENCE_WINDOW_HOURS is STICKY-banned: it stays out of all lists
@@ -895,6 +1021,9 @@ def scrape_amazon_links():
         name_map = dict(list(name_map.items())[-80000:])
     r2_put_amazon_links({"n": name_map, "tried": sorted(keepa_tried)[-100000:]}, NAMES_KEY)
 
+    # Non-Amazon store tabs, fed transversally by every source above.
+    write_store_tabs(cleared)
+
     r2_upload_amazon_html()
     return last
 
@@ -937,6 +1066,9 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     posts: list[tuple[datetime | None, list[str]]] = []
     for channel in channels:
         for post in get_telegram_link_posts(channel):
+            # Tracked non-Amazon stores go to their own transversal tabs.
+            store_scan_text(post["html"], post["dt"].isoformat() if post["dt"] else "",
+                            _post_text_name(post["html"]))
             urls = extract_amazon_urls(post["html"])
             if urls:
                 posts.append((post["dt"], urls))
@@ -965,6 +1097,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         try:
             resp = requests.get(page, timeout=30, headers=_BROWSER_HEADERS)
             resp.raise_for_status()
+            store_scan_text(resp.text)   # tracked stores -> their own tabs
             for raw in extract_amazon_urls(resp.text):
                 if raw not in seen_raw:
                     seen_raw.add(raw)
@@ -1253,6 +1386,8 @@ const TABS = [
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
+  { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
+  { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
 ];
 const PAGE = 200;
 let current = TABS[0];
