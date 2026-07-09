@@ -37,5 +37,6 @@ jobs:
           AMAZON_TELEGRAM_CHANNELS_JSON: ${{ secrets.AMAZON_TELEGRAM_CHANNELS_JSON }}
           AMAZON_WEB_PAGES_JSON: ${{ secrets.AMAZON_WEB_PAGES_JSON }}
           SOURCES_JSON: ${{ secrets.SOURCES_JSON }}
+          TERAPIA_API: ${{ secrets.TERAPIA_API }}
           KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
         run: python scraper.py --amazon

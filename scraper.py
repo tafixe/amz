@@ -968,6 +968,48 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+def get_terapia_items() -> list[tuple[str, str, str, bool, str]]:
+    """WordPress source: each post carries an Amazon short link (amzn.to) and the
+    post title is the product name. Read the REST API (newest first); the short
+    link is expanded to the ASIN downstream. Returns (amazon_url, iso_date,
+    coupon, low, name) tuples."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    seen = set()
+    # Endpoint lives in SOURCES_JSON["terapia_api"]; falls back to its own secret
+    # so it can be added without rewriting the whole SOURCES_JSON blob.
+    base = SOURCES.get("terapia_api", "") or os.environ.get("TERAPIA_API", "")
+    if not base:
+        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    sep = "&" if "?" in base else "?"
+    for page in (1, 2):
+        try:
+            r = sess.get(f"{base}{sep}page={page}", timeout=40)
+            if r.status_code != 200:
+                break
+            posts = r.json()
+        except (requests.RequestException, ValueError) as e:
+            log.warning("terapia fetch p%d: %s", page, e)
+            break
+        if not posts:
+            break
+        for p in posts:
+            content = (p.get("content", {}) or {}).get("rendered", "")
+            date = p.get("date_gmt") or p.get("date") or ""
+            if date and not date.endswith(("Z", "+00:00")):
+                date += "+00:00"
+            name = _clean_name((p.get("title", {}) or {}).get("rendered", ""))
+            store_scan_text(content, date, name)   # transversal store tabs
+            urls = extract_amazon_urls(content)
+            if not urls or urls[0] in seen:
+                continue
+            seen.add(urls[0])
+            out.append((urls[0], date, extract_coupon_code(content), False, name))
+    log.info("terapia: %d amazon deals", len(out))
+    return out
+
+
 def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
     """Deals from a price-tracker's RSS feeds (highlights + popular + top drops;
     the feeds escape the site's bot challenge). Each item's /product/<ASIN> link
@@ -1064,13 +1106,15 @@ def scrape_amazon_links():
         ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
         ([], [], get_camel_items, "data/camel.json"),
         ([], [], get_titas_items, "data/titas.json"),
+        ([], [], get_terapia_items, "data/terapia.json"),
     ]:
         # Exclude ASINs already shown on an earlier tab this run (cross-tab
         # uniqueness). The reference-source sticky-ban is applied via `banned`.
         exclude = set(claimed)
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
-                                "data/cholloes.json", "data/camel.json", "data/titas.json")
+                                "data/cholloes.json", "data/camel.json", "data/titas.json",
+                                "data/terapia.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
@@ -1467,6 +1511,7 @@ const TABS = [
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
+  { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
 ];
