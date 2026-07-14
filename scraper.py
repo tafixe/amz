@@ -300,16 +300,26 @@ def fetch_amazon_title(product_url: str, headers: dict | None = None) -> str:
 
 
 def get_telegram_link_posts(channel: str) -> list[dict]:
-    """Scrape a public Telegram channel for recent posts' text (for link mining)."""
+    """Scrape a public Telegram channel for recent posts' text (for link mining).
+    Try both official preview hosts — one can serve an empty page for a given
+    channel/region while the other returns the feed."""
     out = []
-    url = f"https://t.me/s/{channel}"
-    try:
-        resp = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-        })
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        log.error("Failed to fetch Telegram channel %s: %s", channel, e)
+    resp = None
+    for host in ("t.me", "telegram.me"):
+        try:
+            r = requests.get(f"https://{host}/s/{channel}", timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            })
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.warning("Telegram %s/%s: %s", host, channel, e)
+            continue
+        if "data-post" in r.text:   # this host has the feed
+            resp = r
+            break
+        resp = r                    # keep as fallback (may still be empty)
+    if resp is None:
+        log.error("Failed to fetch Telegram channel %s (both hosts)", channel)
         return out
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -594,13 +604,7 @@ def get_geek_items() -> list[dict]:
     if not channel:
         return []
     out, seen = [], set()
-    _posts = get_telegram_link_posts(channel)
-    if _posts:   # DIAG
-        log.info("geek-dbg: %d posts; post0 hrefs=%s", len(_posts),
-                 re.findall(r'href="(https?://[^"]+)"', _posts[0]["html"])[:5])
-    else:
-        log.info("geek-dbg: 0 posts returned")
-    for post in _posts:
+    for post in get_telegram_link_posts(channel):
         h = post["html"]
         # Deal link = the short-code href (e.g. /ojDxiA): a single path segment
         # of 5-8 chars with a digit or capital. Domain-agnostic (no name in code).
