@@ -38,6 +38,5 @@ jobs:
           AMAZON_WEB_PAGES_JSON: ${{ secrets.AMAZON_WEB_PAGES_JSON }}
           SOURCES_JSON: ${{ secrets.SOURCES_JSON }}
           TERAPIA_API: ${{ secrets.TERAPIA_API }}
-          GEEK_CHANNEL: ${{ secrets.GEEK_CHANNEL }}
           KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
         run: python scraper.py --amazon
