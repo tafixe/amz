@@ -103,7 +103,9 @@ KEEPA_TTL_HOURS = int(os.environ.get("KEEPA_TTL_HOURS", "6"))  # re-price each A
 KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"))
 # All-time-low flag is transversal to every tab; cap how many ASINs we (re)price
 # per run so token use stays well within budget (each ~1 token, cached 24h).
-KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "40"))
+# Keepa refills 5 tokens/min (300/h) and we scan 6x/h, so 50/run spends exactly
+# the refill rate — full use of the quota without ever draining the balance.
+KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "50"))
 # Flag as all-time low when current <= lowest * (1 + margin). 0.005 = 0.5%,
 # per the Keepa minimum-detection module spec.
 KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.005"))
@@ -1179,7 +1181,7 @@ def scrape_amazon_links():
     claimed = set()
 
     last = None
-    for channels, web_pages, items_fn, state_key in [
+    TAB_ROWS = [
         (AMAZON_TELEGRAM_CHANNELS, AMAZON_WEB_PAGES, None, "data/amazon_links.json"),
         (SOURCES.get("descontos_channels", []), [], None, "data/descontos.json"),
         ([], SOURCES.get("deluxe_pages", []), None, "data/deluxe.json"),
@@ -1191,7 +1193,8 @@ def scrape_amazon_links():
         ([], [], get_camel_items, "data/camel.json"),
         ([], [], get_titas_items, "data/titas.json"),
         ([], [], get_terapia_items, "data/terapia.json"),
-    ]:
+    ]
+    for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # Exclude ASINs already shown on an earlier tab this run (cross-tab
         # uniqueness). The reference-source sticky-ban is applied via `banned`.
         exclude = set(claimed)
@@ -1201,9 +1204,20 @@ def scrape_amazon_links():
                                 "data/terapia.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
+        # Fair share of the Keepa token budget: a tab may spend at most its slice
+        # of what is still left, so a hungry early tab (e.g. one scanning
+        # hundreds of candidates) can't starve the last ones. Whatever a tab
+        # does not use stays in the pot for the tabs after it.
+        fair = None
+        if price_budget:
+            tabs_left = len(TAB_ROWS) - i
+            fair = [max(1, price_budget[0] // tabs_left)]
+            slice_cap = fair[0]
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
-                                price_budget, banned, top_rank)
+                                fair, banned, top_rank)
+        if price_budget and fair is not None:
+            price_budget[0] -= slice_cap - fair[0]   # only what this tab spent
         for l in last.get("links", []):
             a = _asin_from_url(l["url"])
             if a:
