@@ -594,7 +594,13 @@ def get_geek_items() -> list[dict]:
     if not channel:
         return []
     out, seen = [], set()
-    for post in get_telegram_link_posts(channel):
+    _posts = get_telegram_link_posts(channel)
+    if _posts:   # DIAG
+        log.info("geek-dbg: %d posts; post0 hrefs=%s", len(_posts),
+                 re.findall(r'href="(https?://[^"]+)"', _posts[0]["html"])[:5])
+    else:
+        log.info("geek-dbg: 0 posts returned")
+    for post in _posts:
         h = post["html"]
         # Deal link = the short-code href (e.g. /ojDxiA): a single path segment
         # of 5-8 chars with a digit or capital. Domain-agnostic (no name in code).
