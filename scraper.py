@@ -305,7 +305,9 @@ def get_telegram_link_posts(channel: str) -> list[dict]:
     channel/region while the other returns the feed."""
     out = []
     resp = None
-    for host in ("t.me", "telegram.me"):
+    # telegram.me first — t.me has been unreliable from the CI region; kept only
+    # as a last-resort fallback.
+    for host in ("telegram.me", "t.me"):
         try:
             r = requests.get(f"https://{host}/s/{channel}", timeout=30, headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
