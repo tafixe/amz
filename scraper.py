@@ -578,6 +578,78 @@ def write_store_tabs(cleared: set):
         log.info("[%s] store tab: %d links (%d new this run)", key, len(links), fresh)
 
 
+# ---------------------------------------------------------------------------
+# Geek tab: a Telegram channel whose deals hide behind a CAPTCHA-protected
+# short link (no ASIN reachable server-side), so this is a plain link list —
+# each row opens the deal link in the user's real browser. Name and any coupon
+# come from the post text. Channel name lives only in the GEEK_CHANNEL secret.
+# ---------------------------------------------------------------------------
+GEEK_TAB_KEY = "data/geek.json"
+
+
+def get_geek_items() -> list[dict]:
+    """Parse the Geek Telegram channel: one deal per post (short deal link +
+    product name in the text). Returns [{url, name, date, coupon}]."""
+    channel = os.environ.get("GEEK_CHANNEL", "") or SOURCES.get("geek_channel", "")
+    if not channel:
+        return []
+    out, seen = [], set()
+    for post in get_telegram_link_posts(channel):
+        h = post["html"]
+        # Deal link = the short-code href (e.g. /ojDxiA): a single path segment
+        # of 5-8 chars with a digit or capital. Domain-agnostic (no name in code).
+        deal = ""
+        for u in re.findall(r'href="(https?://[^"]+)"', h):
+            p = urlparse(u).path
+            if re.fullmatch(r"/[A-Za-z0-9]{5,8}", p) and re.search(r"[A-Z0-9]", p[1:]):
+                deal = u
+                break
+        if not deal or deal in seen:
+            continue
+        seen.add(deal)
+        text = html.unescape(re.sub(r"<[^>]+>", "\n", re.sub(r"<br\s*/?>", "\n", h)))
+        head = text.split("\U0001F449")[0]                 # everything before the 👉
+        head = re.sub(r"#\w+", "", head).replace("❗", " ")
+        lines = [l.strip() for l in head.splitlines() if len(l.strip()) > 3]
+        name = _clean_name(max(lines, key=len)) if lines else ""
+        date = post["dt"].isoformat() if post["dt"] else ""
+        store_scan_text(h, date, name)                     # feed AliExpress/PCC tabs too
+        out.append({"url": deal, "name": name[:160], "date": date,
+                    "coupon": extract_coupon_code(text)})
+    log.info("geek: %d deals", len(out))
+    return out
+
+
+def write_geek_tab(cleared: set):
+    """Merge this run's Geek deals into data/geek.json: dedupe by deal link,
+    keep first-seen dates, drop opened/cleared, newest first, cap 300."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state = r2_get_amazon_links(GEEK_TAB_KEY)
+    merged = {l.get("url"): l for l in state.get("links", []) if l.get("url")}
+    fresh = 0
+    for it in get_geek_items():
+        prev = merged.get(it["url"])
+        if prev:
+            if it.get("coupon") and not prev.get("coupon"):
+                prev["coupon"] = it["coupon"]
+            if it.get("name") and not prev.get("name"):
+                prev["name"] = it["name"]
+        else:
+            it["date"] = it.get("date") or now_iso
+            merged[it["url"]] = it
+            fresh += 1
+    links = [l for l in merged.values() if l["url"] not in cleared]
+    links.sort(key=lambda l: l.get("date", ""), reverse=True)
+    links = links[:300]
+    for l in links:
+        if not l.get("coupon"):
+            l.pop("coupon", None)
+        if not l.get("name"):
+            l["name"] = "Deal"
+    r2_put_amazon_links({"updated": now_iso, "links": links}, GEEK_TAB_KEY)
+    log.info("[%s] geek tab: %d links (%d new this run)", GEEK_TAB_KEY, len(links), fresh)
+
+
 # ASIN map for the community deals site: thread id -> ASIN ("" = deal page
 # checked, no Amazon link found). Persisted in R2 so each page is fetched once.
 CHOLLO_MAP_KEY = "data/chollo_map.json"
@@ -1143,6 +1215,9 @@ def scrape_amazon_links():
     # Non-Amazon store tabs, fed transversally by every source above.
     write_store_tabs(cleared)
 
+    # Geek tab (CAPTCHA-walled short links -> plain link list, its own source).
+    write_geek_tab(cleared)
+
     r2_upload_amazon_html()
     return last
 
@@ -1512,6 +1587,7 @@ const TABS = [
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
+  { id:"geek",   label:"Geek",       src:"/data/geek.json",         kind:"tg" },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
 ];
