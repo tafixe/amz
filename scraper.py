@@ -261,16 +261,15 @@ def resolve_amazon_link(raw_url: str) -> dict | None:
         log.info("No ASIN found in Amazon link: %s", final_url)
         return None
 
-    tag = _affiliate_tag_for(marketplace)
+    # Clean product URL — no affiliate tag, no tracking params.
     clean_url = f"https://www.{marketplace}/dp/{asin}"
-    affiliate_url = f"{clean_url}?tag={tag}" if tag else clean_url
 
     return {
         "id": f"{asin}-{marketplace}",
         "asin": asin,
         "marketplace": marketplace,
         "clean_url": clean_url,
-        "affiliate_url": affiliate_url,
+        "affiliate_url": clean_url,   # kept for downstream compatibility
         "name": _slug_name(parsed.path) or f"Produto {asin}",
     }
 
@@ -746,10 +745,15 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
             low = bool(lowest and current and current <= lowest * (1 + KEEPA_LOW_MARGIN))
             # Sales rank (csv 3) — popularity; lower = more popular, -1 = unranked.
             rank = cur_arr[3] if (len(cur_arr) > 3 and isinstance(cur_arr[3], int) and cur_arr[3] > 0) else None
+            # First product image (medium variant) — just the CDN filename; the
+            # browser loads the thumb straight from Amazon's image CDN. Free:
+            # it rides in the same 1-token response.
+            imgs = p.get("images") or []
+            img = (imgs[0].get("m") or imgs[0].get("l") or "") if imgs and isinstance(imgs[0], dict) else ""
             low_cache[a] = {"low": low, "checked": now.isoformat(),
                             "cat": p.get("rootCategory"),
                             "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, ""),
-                            "rank": rank}
+                            "rank": rank, "i": img}
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
@@ -1067,10 +1071,12 @@ def scrape_amazon_links():
     """Scan each configured Telegram list into its own JSON, then refresh the page.
     Telegram tab -> data/amazon_links.json ; Descontos tab -> data/descontos.json."""
     log.info("=== Amazon link scan at %s ===", datetime.now().isoformat())
-    if AMAZON_AFFILIATE_TAG == "default-tag":
-        log.warning("AMAZON_AFFILIATE_TAG is still the placeholder "
-                    "— set the AMAZON_AFFILIATE_TAG secret to your real tag.")
     cleared = r2_get_amazon_cleared()  # admin-cleared / opened URLs, excluded from all lists
+    # Links used to carry ?tag=...; hidden/cleared entries recorded back then must
+    # keep matching now that URLs are clean. Additive, so store-tab URLs (which
+    # legitimately have query strings) are untouched.
+    for u in [u for u in cleared if "/dp/" in u and "?" in u]:
+        cleared.add(u.split("?", 1)[0])
     for v in _STORE_ITEMS.values():    # fresh transversal store collector this run
         v.clear()
 
@@ -1301,6 +1307,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # (repairs cached entries poisoned by the old slug fallback too).
         if resolved.get("name", "") == resolved.get("asin"):
             resolved["name"] = f"Produto {resolved['asin']}"
+        # Self-heal: strip the affiliate tag from resolutions cached before
+        # links went clean.
+        if "?" in (resolved.get("affiliate_url") or ""):
+            resolved["affiliate_url"] = resolved["affiliate_url"].split("?", 1)[0]
         if resolved["affiliate_url"] in cleared:  # admin cleared this one
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
@@ -1369,6 +1379,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             price_budget[0] -= used
         for l in links:
             e = low_cache.get(_asin_from_url(l["url"])) or {}
+            if e.get("i"):
+                l["img"] = e["i"]   # CDN filename; the browser builds the URL
             if e.get("low"):
                 l["low"] = True
                 if e.get("min"):
@@ -1499,6 +1511,8 @@ def generate_amazon_html() -> str:
   li .cpn.ok { border-color:var(--green); color:var(--green); }
   li .tag.srctab { border:1px solid var(--border); border-radius:6px; padding:1px 7px;
     margin-left:8px; color:var(--muted); font-weight:600; }
+  li .thumb { width:36px; height:36px; object-fit:contain; flex-shrink:0;
+    margin-right:10px; border-radius:6px; background:#fff; }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
@@ -1564,7 +1578,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1652,8 +1666,12 @@ function render(){
     const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
     // During transversal search, show which tab the result came from.
     const src = l.srcTab ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
+    // Tiny product thumb, loaded by the browser straight from Amazon's CDN
+    // (._SL96_ = small variant). Hidden automatically if it fails to load.
+    const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
+      esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
     return '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + src + tag +
+      th + '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
   }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
