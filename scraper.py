@@ -1028,6 +1028,41 @@ def get_terapia_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
+    """Server-rendered deals site (Next.js). Each card on the homepage has a
+    direct Amazon /dp/ASIN link, the product name in the image alt, and a
+    /deal/<ms> id that is the publish timestamp. Returns
+    (amazon_url, iso_date, coupon, low, name) tuples."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    seen = set()
+    url = os.environ.get("DIB_URL", "") or SOURCES.get("dib_url", "")
+    if not url:
+        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    try:
+        h = sess.get(url, timeout=40).text
+    except requests.RequestException as e:
+        log.error("dib: %s", e)
+        return out
+    store_scan_text(h)   # transversal AliExpress/PCC collector
+    for m in re.finditer(r'href="https?://www\.amazon\.[a-z.]+/dp/([A-Z0-9]{10})[^"]*"', h):
+        a = m.group(1)
+        if a in seen:
+            continue
+        seen.add(a)
+        card = h[max(0, m.start() - 1700):m.start()]
+        alts = re.findall(r'alt="([^"]+)"', card)
+        name = _clean_name(html.unescape(alts[-1])) if alts else ""
+        dm = re.findall(r"/deal/(\d{13})", card)
+        date = (datetime.fromtimestamp(int(dm[-1]) / 1000, timezone.utc).isoformat()
+                if dm else "")
+        coupon = extract_coupon_code(re.sub(r"<[^>]+>", " ", card))
+        out.append((f"https://www.amazon.es/dp/{a}", date, coupon, False, name))
+    log.info("dib: %d amazon.es deals", len(out))
+    return out
+
+
 def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
     """Deals from a price-tracker's RSS feeds (highlights + popular + top drops;
     the feeds escape the site's bot challenge). Each item's /product/<ASIN> link
@@ -1127,6 +1162,7 @@ def scrape_amazon_links():
         ([], [], get_camel_items, "data/camel.json"),
         ([], [], get_titas_items, "data/titas.json"),
         ([], [], get_terapia_items, "data/terapia.json"),
+        ([], [], get_dib_items, "data/dib.json"),
     ]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # Exclude ASINs already shown on an earlier tab this run (cross-tab
@@ -1135,7 +1171,7 @@ def scrape_amazon_links():
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
-                                "data/terapia.json")
+                                "data/terapia.json", "data/dib.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
         # Fair share of the Keepa token budget: a tab may spend at most its slice
@@ -1552,6 +1588,7 @@ const TABS = [
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
+  { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
 ];
