@@ -1147,6 +1147,31 @@ def write_bom_tab(cleared: set):
             except requests.RequestException as e:
                 log.warning("bom store %s: %s", entry[0], e)
 
+    # Affiliate NETWORK behind each store: the first redirect hop of the site's
+    # /go/<slug> outbound reveals the platform (Awin, TradeTracker, CJ, ...).
+    # One probe per store, no redirects followed, cached forever.
+    NETS = ((r"awin1\.|zenaps", "Awin"), (r"tradetracker", "TradeTracker"),
+            (r"anrdoezrs|dpbolvw|jdoqocy|kqzyfj|tkqlhce|dotomi|emjcd", "CJ"),
+            (r"tradedoubler", "TradeDoubler"), (r"webgains", "Webgains"),
+            (r"linksynergy|rakuten", "Rakuten"), (r"metaffiliation|kwanko", "Kwanko"),
+            (r"effiliation", "Effiliation"), (r"daisycon", "Daisycon"),
+            (r"belboon", "Belboon"), (r"\.sjv\.io|\.pxf\.io|impact\.com", "Impact"),
+            (r"prf\.hn|partnerize", "Partnerize"), (r"admitad", "Admitad"),
+            (r"timeone", "TimeOne"), (r"aliexpress", "AliExpress"),
+            (r"amazon\.|amzn\.", "Amazon"))
+    for cid, entry in smap.items():
+        while len(entry) < 5:
+            entry.append("")
+        if entry[2] and not entry[4] and fetched < BOM_MAX_FETCH:
+            fetched += 1
+            try:
+                r0 = sess.get(f"{base}/go/{entry[2]}", timeout=25, allow_redirects=False)
+                host = re.sub(r"^https?://", "", r0.headers.get("Location", "")).split("/")[0].lower()
+                entry[4] = (next((n for pat, n in NETS if re.search(pat, host)), "")
+                            or ("direto" if host else ""))
+            except requests.RequestException as e:
+                log.warning("bom net %s: %s", entry[0], e)
+
     links = []
     for p in posts:
         pid = str(p.get("id"))
@@ -1162,6 +1187,9 @@ def write_bom_tab(cleared: set):
         l = {"name": _clean_name(html.unescape(re.sub(r"<[^>]+>", "",
                      (p.get("title") or {}).get("rendered", "")))),
              "url": url, "date": date, "store": store or "Outras"}
+        se = smap.get(cid) or []
+        if len(se) >= 5 and se[4] and se[4] != "direto":
+            l["net"] = se[4]       # affiliate platform, for reference
         if e.get("c"):
             l["coupon"] = e["c"]
         if e.get("u"):
@@ -1748,7 +1776,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1860,8 +1888,8 @@ function render(){
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
     const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
       esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
-    // Store/company name up front, as a small reference prefix.
-    const stref = l.store ? '<span class="stref">'+esc(l.store)+'</span>' : '';
+    // Affiliate platform (Awin, TradeTracker, CJ, ...) up front, for reference.
+    const stref = l.net ? '<span class="stref" title="Plataforma de afiliação">'+esc(l.net)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
       th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
