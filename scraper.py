@@ -1706,9 +1706,13 @@ def generate_amazon_html() -> str:
   li.grp .grp-n { color:var(--muted); font-weight:600; text-transform:none; letter-spacing:0; }
   li .stref { color:var(--brand); font-weight:700; margin-right:7px; }
   li .stref::after { content:"·"; color:var(--muted); margin-left:7px; font-weight:400; }
-  ul.compact li a { padding:7px 16px; font-size:13px; }
-  ul.compact .name { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
-    -webkit-box-orient:vertical; }
+  /* Compact rows are two lines: title on top, meta (coupon · validity ·
+     publish date) below — so the date is never squeezed off-screen. */
+  ul.compact li a { padding:7px 16px; font-size:13px; flex-wrap:wrap; row-gap:3px; }
+  ul.compact .name { flex:1 1 100%; overflow:hidden; display:-webkit-box;
+    -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  ul.compact .cpn { margin-left:0; }
+  ul.compact .arrow { display:none; }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
@@ -1877,7 +1881,8 @@ function render(){
     // For all-time-low rows show the historical min price; otherwise the usual tag.
     const tag = (l.low && l.minp)
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
-      : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '');
+      : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'" title="Data de publicação">'+
+          (l.store?'pub. ':'')+esc(l.extra)+'</span>' : '');
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
     const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
     // Click-to-copy coupon chip (stops the row link from opening).
