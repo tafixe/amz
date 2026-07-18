@@ -39,5 +39,6 @@ jobs:
           SOURCES_JSON: ${{ secrets.SOURCES_JSON }}
           TERAPIA_API: ${{ secrets.TERAPIA_API }}
           DIB_URL: ${{ secrets.DIB_URL }}
+          BOM_URL: ${{ secrets.BOM_URL }}
           KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
         run: python scraper.py --amazon

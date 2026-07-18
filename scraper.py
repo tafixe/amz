@@ -1063,6 +1063,125 @@ def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Bom tab: a coupon/discount site (WordPress). The REST API lists the newest
+# offers (title + date; the category IS the store). The coupon code sits on
+# each offer's page behind a reveal button (data-clipboard-text), and each
+# store page carries the store's real website in JSON-LD — so rows can link
+# STRAIGHT to the store, clean. Post/store lookups are cached in R2 so each
+# page is fetched once, ever. The UI groups this tab by store, coupons first.
+# ---------------------------------------------------------------------------
+BOM_TAB_KEY = "data/bom.json"
+BOM_MAP_KEY = "data/bom_map.json"
+BOM_MAX_FETCH = int(os.environ.get("BOM_MAX_FETCH", "15"))
+
+
+def write_bom_tab(cleared: set):
+    base = (os.environ.get("BOM_URL", "") or SOURCES.get("bom_url", "")).rstrip("/")
+    if not base:
+        return
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    try:
+        posts = sess.get(f"{base}/wp-json/wp/v2/posts?per_page=50", timeout=40).json()
+    except (requests.RequestException, ValueError) as e:
+        log.error("bom posts: %s", e)
+        return
+    if not isinstance(posts, list) or not posts:
+        return
+
+    state = r2_get_amazon_links(BOM_MAP_KEY)
+    pmap: dict = state.get("p", {})   # post id -> {"c": code|"", "u": "dd/mm"}
+    smap: dict = state.get("s", {})   # category id -> [store_name, store_site]
+
+    # Store names for categories we haven't met yet (one batched request).
+    need = sorted({str((p.get("categories") or [0])[0]) for p in posts} - set(smap))
+    if need:
+        try:
+            cats = sess.get(f"{base}/wp-json/wp/v2/categories?include={','.join(need)}"
+                            f"&per_page=100", timeout=40).json()
+            for c in cats if isinstance(cats, list) else []:
+                smap[str(c["id"])] = [c.get("name", ""), "", c.get("slug", "")]
+        except (requests.RequestException, ValueError) as e:
+            log.warning("bom categories: %s", e)
+
+    fetched = 0
+    # Coupon code + validity from each new offer page (cached forever). The
+    # offer page also reveals its store-page URL (header data-url), which we
+    # keep on the store entry — no site paths hardcoded here.
+    for p in posts:
+        pid = str(p.get("id"))
+        if pid in pmap or fetched >= BOM_MAX_FETCH:
+            continue
+        fetched += 1
+        entry = {"c": "", "u": ""}
+        try:
+            ph = sess.get(p.get("link", ""), timeout=30).text
+            cm = re.search(r'data-code="([^"]+)"', ph)
+            # "NO" is the site's sentinel for "no code needed" — not a coupon.
+            if cm and html.unescape(cm.group(1)).strip().upper() not in ("NO", "N/A"):
+                entry["c"] = html.unescape(cm.group(1)).strip()
+            vm = re.search(r"v[aá]lido at[eé] (\d{2}/\d{2})/\d{4}", ph)
+            if vm:
+                entry["u"] = vm.group(1)
+            um = re.search(r'class="href" data-url="(https?://[^"]+)"', ph)
+            cid = str((p.get("categories") or [0])[0])
+            se = smap.get(cid)
+            if um and se is not None and len(se) >= 3 and not se[1]:
+                if len(se) == 3:
+                    se.append("")
+                se[3] = um.group(1)          # store page, discovered not built
+        except requests.RequestException as e:
+            log.warning("bom post %s: %s", pid, e)
+        pmap[pid] = entry
+
+    # Store website (clean outbound link) from each store page's JSON-LD.
+    for cid, entry in smap.items():
+        if len(entry) >= 4 and entry[3] and not entry[1] and fetched < BOM_MAX_FETCH:
+            fetched += 1
+            try:
+                sh = sess.get(entry[3], timeout=30).text
+                m = re.search(r'"sameAs":\s*"(https?://[^"]+)"', sh)
+                if m:
+                    entry[1] = m.group(1).rstrip("/")
+            except requests.RequestException as e:
+                log.warning("bom store %s: %s", entry[0], e)
+
+    links = []
+    for p in posts:
+        pid = str(p.get("id"))
+        cid = str((p.get("categories") or [0])[0])
+        store, site = (smap.get(cid) or ["", ""])[:2]
+        date = p.get("date_gmt") or p.get("date") or ""
+        if date and not date.endswith(("Z", "+00:00")):
+            date += "+00:00"
+        # Clean link straight to the store; #fragment keeps it unique per deal
+        # (so hide-on-open hides one offer, not the whole store).
+        url = f"{site}#bd{pid}" if site else p.get("link", "")
+        e = pmap.get(pid) or {}
+        l = {"name": _clean_name(html.unescape(re.sub(r"<[^>]+>", "",
+                     (p.get("title") or {}).get("rendered", "")))),
+             "url": url, "date": date, "store": store or "Outras"}
+        if e.get("c"):
+            l["coupon"] = e["c"]
+        if e.get("u"):
+            l["val"] = e["u"]      # "dd/mm" validity
+        if l["name"] and url and url not in cleared:
+            links.append(l)
+    links.sort(key=lambda l: l.get("date", ""), reverse=True)
+
+    # Keep the caches bounded to what still matters.
+    if len(pmap) > 600:
+        keep = {str(p.get("id")) for p in posts}
+        pmap = {k: v for k, v in pmap.items() if k in keep or len(pmap) <= 600}
+        pmap = dict(list(pmap.items())[-600:])
+    r2_put_amazon_links({"p": pmap, "s": smap}, BOM_MAP_KEY)
+    r2_put_amazon_links({"updated": datetime.now(timezone.utc).isoformat(),
+                         "links": links}, BOM_TAB_KEY)
+    log.info("[%s] bom tab: %d offers, %d with coupon (%d pages fetched)",
+             BOM_TAB_KEY, len(links), sum(1 for l in links if l.get("coupon")), fetched)
+
+
 def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
     """Deals from a price-tracker's RSS feeds (highlights + popular + top drops;
     the feeds escape the site's bot challenge). Each item's /product/<ASIN> link
@@ -1210,6 +1329,9 @@ def scrape_amazon_links():
 
     # Non-Amazon store tabs, fed transversally by every source above.
     write_store_tabs(cleared)
+
+    # Bom tab: coupon/discount site, grouped by store in the UI.
+    write_bom_tab(cleared)
 
     r2_upload_amazon_html()
     return last
@@ -1549,6 +1671,14 @@ def generate_amazon_html() -> str:
     margin-left:8px; color:var(--muted); font-weight:600; }
   li .thumb { width:36px; height:36px; object-fit:contain; flex-shrink:0;
     margin-right:10px; border-radius:6px; background:#fff; }
+  /* Grouped/compact mode (Bom): store header rows + tighter items */
+  li.grp { display:flex; justify-content:space-between; align-items:baseline;
+    padding:12px 16px 3px; font-size:11px; text-transform:uppercase;
+    letter-spacing:.5px; color:var(--brand); font-weight:800; }
+  li.grp .grp-n { color:var(--muted); font-weight:600; text-transform:none; letter-spacing:0; }
+  ul.compact li a { padding:7px 16px; font-size:13px; }
+  ul.compact .name { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
+    -webkit-box-orient:vertical; }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
@@ -1589,6 +1719,7 @@ const TABS = [
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
+  { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
 ];
@@ -1615,7 +1746,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1691,7 +1822,25 @@ function render(){
     document.getElementById("moreBtn").style.display="none"; return; }
   const visited = visitedSet();
   const useGreen = current.kind !== "tg";
-  const slice = items.slice(0, shown);
+  // Grouped mode (e.g. Bom): compact rows bucketed by store — stores ordered
+  // by their newest offer, coupons first inside each store.
+  const grouping = !!current.group && !query;
+  box.classList.toggle("compact", grouping);
+  let ordered = items, counts = {};
+  if (grouping) {
+    const newest = {};
+    items.forEach(l => { const s = l.store || "Outras";
+      if (!(s in newest)) newest[s] = l.date || "";
+      counts[s] = counts[s] || {n:0, c:0}; counts[s].n++; if (l.coupon) counts[s].c++; });
+    ordered = items.slice().sort((a, b) => {
+      const sa = a.store || "Outras", sb = b.store || "Outras";
+      if (sa !== sb) return (newest[sb]||"").localeCompare(newest[sa]||"") || sa.localeCompare(sb);
+      const d = (b.coupon?1:0) - (a.coupon?1:0);
+      return d || (b.date||"").localeCompare(a.date||"");
+    });
+  }
+  const slice = ordered.slice(0, shown);
+  let lastStore = null;
   box.innerHTML = slice.map(l => {
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
     const dot = l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '';
@@ -1699,6 +1848,8 @@ function render(){
     const tag = (l.low && l.minp)
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
       : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'">'+esc(l.extra)+'</span>' : '');
+    // Validity of a coupon/offer ("até dd/mm"), when the source states it.
+    const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
     // Click-to-copy coupon chip (stops the row link from opening).
     const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
     // During transversal search, show which tab the result came from.
@@ -1707,9 +1858,19 @@ function render(){
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
     const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
       esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
-    return '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + src + tag +
+    const row = '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+      th + '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
+    if (grouping) {
+      const s = l.store || "Outras";
+      if (s !== lastStore) {
+        lastStore = s;
+        const c = counts[s];
+        return '<li class="grp"><span>'+esc(s)+'</span><span class="grp-n">'+c.n+
+               (c.c ? ' · '+c.c+' 🎟️' : '')+'</span></li>' + row;
+      }
+    }
+    return row;
   }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
 }
