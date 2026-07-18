@@ -1697,7 +1697,7 @@ def generate_amazon_html() -> str:
   li .cpn.ok { border-color:var(--green); color:var(--green); }
   li .tag.srctab { border:1px solid var(--border); border-radius:6px; padding:1px 7px;
     margin-left:8px; color:var(--muted); font-weight:600; }
-  li .thumb { width:36px; height:36px; object-fit:contain; flex-shrink:0;
+  li .thumb { width:38px; height:38px; object-fit:contain; flex-shrink:0;
     margin-right:10px; border-radius:6px; background:#fff; }
   /* Grouped/compact mode (Bom): store header rows + tighter items */
   li.grp { display:flex; justify-content:space-between; align-items:baseline;
