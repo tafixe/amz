@@ -1676,6 +1676,8 @@ def generate_amazon_html() -> str:
     padding:12px 16px 3px; font-size:11px; text-transform:uppercase;
     letter-spacing:.5px; color:var(--brand); font-weight:800; }
   li.grp .grp-n { color:var(--muted); font-weight:600; text-transform:none; letter-spacing:0; }
+  li .stref { color:var(--brand); font-weight:700; margin-right:7px; }
+  li .stref::after { content:"·"; color:var(--muted); margin-left:7px; font-weight:400; }
   ul.compact li a { padding:7px 16px; font-size:13px; }
   ul.compact .name { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2;
     -webkit-box-orient:vertical; }
@@ -1858,8 +1860,10 @@ function render(){
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
     const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
       esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
+    // Store/company name up front, as a small reference prefix.
+    const stref = l.store ? '<span class="stref">'+esc(l.store)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+dot+esc(l.name)+'</span>'+ cpn + val + src + tag +
+      th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
       const s = l.store || "Outras";
