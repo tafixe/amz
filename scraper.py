@@ -1292,9 +1292,10 @@ def scrape_amazon_links():
     all_asins = set()           # every ASIN shown this run -> to bound the cache
     price_budget = [KEEPA_MAX_PRICE_PER_RUN]
 
-    # Cross-tab uniqueness: an ASIN shows on the FIRST tab (in this order) that
-    # has it. `claimed` holds ASINs already taken; later tabs exclude them.
-    claimed = set()
+    # Deals on several lists are NOT removed anymore: every tab keeps its copy
+    # and the UI colors the row, stronger the more lists carry it. `results`
+    # holds each tab's written state so multiplicity is stamped after the loop.
+    results = {}
 
     last = None
     TAB_ROWS = [
@@ -1312,9 +1313,8 @@ def scrape_amazon_links():
         ([], [], get_dib_items, "data/dib.json"),
     ]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
-        # Exclude ASINs already shown on an earlier tab this run (cross-tab
-        # uniqueness). The reference-source sticky-ban is applied via `banned`.
-        exclude = set(claimed)
+        # The reference-source sticky-ban is applied via `banned`.
+        exclude = None
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
@@ -1335,10 +1335,26 @@ def scrape_amazon_links():
                                 fair, banned, top_rank)
         if price_budget and fair is not None:
             price_budget[0] -= slice_cap - fair[0]   # only what this tab spent
-        for l in last.get("links", []):
-            a = _asin_from_url(l["url"])
-            if a:
-                claimed.add(a)   # taken — no other tab shows it this run
+        results[state_key] = last
+
+    # Stamp cross-tab multiplicity: x = number of lists carrying the ASIN this
+    # run. Only rows with x >= 2 carry the field; the UI tints them (stronger
+    # with more lists). Tabs whose links changed are re-written.
+    count: dict = {}
+    for state in results.values():
+        for a in {_asin_from_url(l["url"]) for l in state.get("links", [])} - {""}:
+            count[a] = count.get(a, 0) + 1
+    for state_key, state in results.items():
+        changed = False
+        for l in state.get("links", []):
+            x = count.get(_asin_from_url(l["url"]), 1)
+            if x >= 2 and l.get("x") != x:
+                l["x"] = x
+                changed = True
+            elif x < 2 and l.pop("x", None) is not None:
+                changed = True
+        if changed:
+            r2_put_amazon_links(state, state_key)
 
     # Persist the all-time-low cache (already refreshed per-tab before writing),
     # bounded to the ASINs still shown.
@@ -1780,7 +1796,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1 }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1895,7 +1911,11 @@ function render(){
       esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
     // Affiliate platform (Awin, TradeTracker, CJ, ...) up front, for reference.
     const stref = l.net ? '<span class="stref" title="Plataforma de afiliação">'+esc(l.net)+'</span>' : '';
-    const row = '<li data-url="'+esc(l.url)+'"><a class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+    // Deal on several lists: tint the row, stronger the more lists carry it.
+    const dupStyle = l.x > 1
+      ? ' style="background:rgba(255,153,0,'+Math.min(0.10 + (l.x-2)*0.09, 0.40).toFixed(2)+')" title="Em '+l.x+' listas"'
+      : '';
+    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
       th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
