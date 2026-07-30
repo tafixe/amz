@@ -1418,12 +1418,35 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Collect posts that contain Amazon links, with their publish time, so we can
     # keep only the most recent batch (posts within N hours of the newest one).
     raw_to_coupon: dict[str, str] = {}   # raw url -> checkout coupon code (if any)
+    # Worten deals from the same sources are kept IN this tab's list too,
+    # marked differently in the UI (no ASIN -> no Keepa; the row opens the
+    # link). Query strings are stripped so the links stay clean.
+    WORTEN_RE = re.compile(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", re.I)
+    wt_rows: list[dict] = []
+    wt_seen = set()
+
+    def _wt_collect(text, date="", name=""):
+        for u in WORTEN_RE.findall(text or ""):
+            u = re.sub(r"[?#].*$", "", html.unescape(u)).rstrip(").,;/")
+            path = u.split("/", 3)[-1] if u.count("/") >= 3 else ""
+            # product pages carry a numeric id in the path; skip category/home
+            if len(path) < 8 or not re.search(r"\d", path) or u in wt_seen:
+                continue
+            wt_seen.add(u)
+            seg = [s for s in path.split("/") if s]
+            slug = re.sub(r"[-_]+", " ", seg[-1]).strip() if seg else ""
+            wt_rows.append({"url": u, "date": date, "wt": 1,
+                            "name": name or (_clean_name(slug) if len(slug) > 3 else "Produto Worten"),
+                            "coupon": extract_coupon_code(text)})
+
     posts: list[tuple[datetime | None, list[str]]] = []
     for channel in channels:
         for post in get_telegram_link_posts(channel):
             # Tracked non-Amazon stores go to their own transversal tabs.
             store_scan_text(post["html"], post["dt"].isoformat() if post["dt"] else "",
                             _post_text_name(post["html"]))
+            _wt_collect(post["html"], post["dt"].isoformat() if post["dt"] else "",
+                        _post_text_name(post["html"]))
             urls = extract_amazon_urls(post["html"])
             if urls:
                 posts.append((post["dt"], urls))
@@ -1453,6 +1476,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             resp = requests.get(page, timeout=30, headers=_BROWSER_HEADERS)
             resp.raise_for_status()
             store_scan_text(resp.text)   # tracked stores -> their own tabs
+            _wt_collect(resp.text)       # Worten -> kept in this tab, marked
             for raw in extract_amazon_urls(resp.text):
                 if raw not in seen_raw:
                     seen_raw.add(raw)
@@ -1570,6 +1594,19 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if raw_to_low.get(raw_url):
             link["low"] = True   # provider already says it's an all-time low
         links.append(link)
+
+    # Worten rows join this tab's list (marked; no ASIN so Keepa skips them).
+    for r in wt_rows:
+        if r["url"] in cleared:
+            continue
+        if not r["date"]:                       # web source: first-seen date
+            r["date"] = seen.get(r["url"]) or now_iso
+            seen[r["url"]] = r["date"]
+        if not r.get("coupon"):
+            r.pop("coupon", None)
+        links.append(r)
+    if wt_rows:
+        log.info("[%s] +%d worten rows", state_key, len(wt_rows))
 
     # All-time-low (Keepa) BEFORE writing: price this tab's ASINs that aren't
     # fresh in the cache (shared per-run budget protects tokens), so the dot is
@@ -1722,6 +1759,10 @@ def generate_amazon_html() -> str:
   li.grp .grp-n { color:var(--muted); font-weight:600; text-transform:none; letter-spacing:0; }
   li .stref { color:var(--brand); font-weight:700; margin-right:7px; }
   li .stref::after { content:"·"; color:var(--muted); margin-left:7px; font-weight:400; }
+  /* Worten rows: red edge + badge, clearly distinct from Amazon rows */
+  li a.wt { box-shadow: inset 3px 0 0 #e11d2e; }
+  li .tag.wtag { border:1px solid #e11d2e; color:#ff5a68; border-radius:6px;
+    padding:1px 7px; margin-left:8px; font-weight:700; }
   /* Compact rows are two lines: title on top, meta (coupon · validity ·
      publish date) below — so the date is never squeezed off-screen. */
   ul.compact li a { padding:7px 16px; font-size:13px; flex-wrap:wrap; row-gap:3px; }
@@ -1796,7 +1837,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1 }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -1915,8 +1956,10 @@ function render(){
     const dupStyle = l.x > 1
       ? ' style="background:rgba(255,153,0,'+Math.min(0.10 + (l.x-2)*0.09, 0.40).toFixed(2)+')" title="Em '+l.x+' listas"'
       : '';
-    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ cpn + val + src + tag +
+    // Worten deal: marked differently (red edge + badge).
+    const wbadge = l.wt ? '<span class="tag wtag">Worten</span>' : '';
+    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(l.wt?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+      th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
       const s = l.store || "Outras";
