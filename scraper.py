@@ -838,23 +838,57 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
             # link (tidd.ly) or a direct worten.pt link — collect both.
             wt_short += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", content)
             wt_short += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", content)
+    # Persistent resolution cache: each short link is OPENED AT MOST ONCE, ever.
+    # Following a shortener registers a (bot) affiliate click on Amazon/Awin —
+    # without this cache the same ~40 links would be re-clicked every 10 min.
+    REF_CACHE_KEY = "data/ref_cache.json"
+    rc = r2_get_amazon_links(REF_CACHE_KEY)
+    amap: dict = rc.get("a", {})   # source link -> ASIN ("" = not a product)
+    wmap: dict = rc.get("w", {})   # awin short link -> worten url ("" = not worten)
+    opened = 0
     recent = set()
     for u in dict.fromkeys(cupo_links):
+        if u in amap:
+            if amap[u]:
+                recent.add(amap[u])
+            continue
+        short = any(h in u for h in AMAZON_SHORT_HOSTS)
+        if short:
+            opened += 1               # this one costs a real redirect follow
         rr = resolve_amazon_link(u)
         if rr:
+            amap[u] = rr["asin"]
             recent.add(rr["asin"])
+        elif not short:
+            amap[u] = ""              # direct non-product link: permanent miss
+        # failed short links stay uncached -> retried while inside the window
     wturls = set()
     for u in dict.fromkeys(wt_short):
-        final = u
-        if "tidd.ly" in u:
-            try:
-                final = sess.get(u, timeout=20, allow_redirects=True).url
-            except requests.RequestException:
-                continue
-        if re.search(r"worten\.pt/", final):
-            wturls.add(re.sub(r"[?#].*$", "", html.unescape(final)).rstrip(").,;/"))
-    log.info("reference source last %dh (published or updated): %d asins, %d worten",
-             hours, len(recent), len(wturls))
+        if "tidd.ly" not in u:        # direct worten link, nothing to open
+            if re.search(r"worten\.pt/", u):
+                wturls.add(re.sub(r"[?#].*$", "", html.unescape(u)).rstrip(").,;/"))
+            continue
+        if u in wmap:
+            if wmap[u]:
+                wturls.add(wmap[u])
+            continue
+        try:
+            final = sess.get(u, timeout=20, allow_redirects=True).url
+            opened += 1
+        except requests.RequestException:
+            continue                  # retried next run
+        wu = (re.sub(r"[?#].*$", "", html.unescape(final)).rstrip(").,;/")
+              if re.search(r"worten\.pt/", final) else "")
+        wmap[u] = wu
+        if wu:
+            wturls.add(wu)
+    if len(amap) > 20000:
+        amap = dict(list(amap.items())[-20000:])
+    if len(wmap) > 20000:
+        wmap = dict(list(wmap.items())[-20000:])
+    r2_put_amazon_links({"a": amap, "w": wmap}, REF_CACHE_KEY)
+    log.info("reference source last %dh (published or updated): %d asins, %d worten "
+             "(%d links opened this run)", hours, len(recent), len(wturls), opened)
     return recent, wturls
 
 
