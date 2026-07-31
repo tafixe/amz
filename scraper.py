@@ -164,10 +164,11 @@ AMAZON_HOST_RE = re.compile(
     r"https?://[^\s\"'<>)]*?(?:"
     r"amazon\.[a-z.]{2,7}"               # amazon.es, amazon.com, amazon.co.uk ...
     r"|amzn\.to|amzn\.eu|a\.co|amzlink\.to"  # short redirectors
+    r"|link\.amazon(?=/)"                # .amazon-gTLD shortener (path = code)
     r")[^\s\"'<>)]*",
     re.IGNORECASE,
 )
-AMAZON_SHORT_HOSTS = ("amzn.to", "amzn.eu", "a.co", "amzlink.to")
+AMAZON_SHORT_HOSTS = ("amzn.to", "amzn.eu", "a.co", "amzlink.to", "link.amazon")
 # ASIN inside a product path: /dp/ASIN, /gp/product/ASIN, /gp/aw/d/ASIN, /product/ASIN
 ASIN_RE = re.compile(
     r"/(?:dp|gp/product|gp/aw/d|product|gp/aw/d|gp/offer-listing)/([A-Z0-9]{10})",
@@ -792,17 +793,18 @@ def keepa_titles(asins: list) -> tuple:
     return titles, queried
 
 
-def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> set:
-    """ASINs that were PUBLISHED *or* UPDATED on the reference source in the last
-    N hours. The source re-promotes old posts by updating them (keeping the
-    original date_gmt), so we order by `modified` and treat a post as recent when
-    EITHER its date_gmt (published) OR its modified_gmt (updated) is within the
-    window. Its posts use short links, so expand them to get the ASIN."""
+def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
+    """What the reference source PUBLISHED *or* UPDATED in the last N hours.
+    The source re-promotes old posts by updating them (keeping the original
+    date_gmt), so we order by `modified` and treat a post as recent when EITHER
+    its date_gmt (published) OR its modified_gmt (updated) is within the window.
+    Posts use short links, so expand them. Returns (asins, worten_urls)."""
     base = SOURCES.get("cupo_api", "")
     if not base:
-        return set()
+        return set(), set()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     cupo_links: list[str] = []
+    wt_short: list[str] = []
     stop = False
     for page in (1, 2, 3, 4):
         if stop:
@@ -830,14 +832,30 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> set:
             if max(stamps) < cutoff:   # ordered by modified desc -> the rest are older
                 stop = True
                 break
-            cupo_links += extract_amazon_urls((p.get("content", {}) or {}).get("rendered", ""))
+            content = (p.get("content", {}) or {}).get("rendered", "")
+            cupo_links += extract_amazon_urls(content)
+            # Worten deals on the reference source hide behind an Awin short
+            # link (tidd.ly) or a direct worten.pt link — collect both.
+            wt_short += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", content)
+            wt_short += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", content)
     recent = set()
     for u in dict.fromkeys(cupo_links):
         rr = resolve_amazon_link(u)
         if rr:
             recent.add(rr["asin"])
-    log.info("reference source last %dh (published or updated): %d asins", hours, len(recent))
-    return recent
+    wturls = set()
+    for u in dict.fromkeys(wt_short):
+        final = u
+        if "tidd.ly" in u:
+            try:
+                final = sess.get(u, timeout=20, allow_redirects=True).url
+            except requests.RequestException:
+                continue
+        if re.search(r"worten\.pt/", final):
+            wturls.add(re.sub(r"[?#].*$", "", html.unescape(final)).rstrip(").,;/"))
+    log.info("reference source last %dh (published or updated): %d asins, %d worten",
+             hours, len(recent), len(wturls))
+    return recent, wturls
 
 
 def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
@@ -853,7 +871,7 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
         return out
 
     if cupo_recent is None:
-        cupo_recent = reference_recent_asins(sess, hours=REFERENCE_WINDOW_HOURS)   # ASINs to exclude
+        cupo_recent = reference_recent_asins(sess, hours=REFERENCE_WINDOW_HOURS)[0]   # ASINs to exclude
 
     # Source promotions (productId is the ASIN).
     try:
@@ -1268,11 +1286,11 @@ def scrape_amazon_links():
     # re-publishes it with a date newer than the ban. Ban time is stored per ASIN.
     _sess = requests.Session()
     _sess.headers.update(_BROWSER_HEADERS)
-    cupo_recent = reference_recent_asins(_sess, hours=REFERENCE_WINDOW_HOURS)
+    cupo_recent, cupo_worten = reference_recent_asins(_sess, hours=REFERENCE_WINDOW_HOURS)
     now_iso = datetime.now(timezone.utc).isoformat()
     BANNED_KEY = "data/cupo_banned.json"
-    banned = r2_get_amazon_links(BANNED_KEY).get("b", {})   # {asin: ban_iso}
-    for a in cupo_recent:
+    banned = r2_get_amazon_links(BANNED_KEY).get("b", {})   # {asin_or_worten_url: ban_iso}
+    for a in cupo_recent | cupo_worten:                      # Worten deals banned by clean URL
         banned[a] = now_iso                                  # (re)stamp the ban as of now
 
     # Shared ASIN -> product name map. Sources that expose titles (DEZ/NAS/TITAS/
@@ -1602,6 +1620,12 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if not r["date"]:                       # web source: first-seen date
             r["date"] = seen.get(r["url"]) or now_iso
             seen[r["url"]] = r["date"]
+        # Same sticky reference-source ban as ASINs, keyed by the clean URL:
+        # hidden once it appeared there, until the source re-publishes it.
+        if banned is not None and r["url"] in banned:
+            if not _dt_after(r["date"], banned[r["url"]]):
+                continue
+            banned.pop(r["url"], None)
         if not r.get("coupon"):
             r.pop("coupon", None)
         links.append(r)
