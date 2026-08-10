@@ -1315,9 +1315,10 @@ def scrape_amazon_links():
         v.clear()
 
     # Cross-check EVERY list against the reference source on every run. Any
-    # product seen there (ASIN or Worten URL, published/updated inside the
-    # rolling window) joins a PERMANENT ban: it never shows in any list again,
-    # even if one of our sources re-publishes it later.
+    # product seen there (ASIN or Worten URL) is banned while inside its 12h
+    # freshness window (the stamp refreshes each scan it stays fresh). After
+    # the window passes, a source re-publishing it with a newer date brings it
+    # back to the lists.
     _sess = requests.Session()
     _sess.headers.update(_BROWSER_HEADERS)
     cupo_recent, cupo_worten = reference_recent_asins(_sess, hours=REFERENCE_WINDOW_HOURS)
@@ -1436,6 +1437,22 @@ def scrape_amazon_links():
 def _asin_from_url(u: str) -> str:
     m = re.search(r"/dp/([A-Z0-9]{10})", u or "")
     return m.group(1) if m else ""
+
+
+def _parse_dt(s):
+    """Parse an ISO timestamp (handles trailing Z); return aware datetime or None."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _dt_after(a, b) -> bool:
+    """True if timestamp a is strictly newer than b (both parseable)."""
+    da, db = _parse_dt(a), _parse_dt(b)
+    return bool(da and db and da > db)
 
 
 def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None, top_rank=None):
@@ -1577,10 +1594,15 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
             continue   # already on an earlier tab this run — keep tabs unique
-        # Reference-source ban is ABSOLUTE: once the product appeared there, it
-        # never shows in any list again — re-publishes by our sources included.
+        # Reference-source ban with a 12h window: the stamp keeps refreshing
+        # while the product stays fresh on the reference source; once that
+        # window passes, a source publishing it with a NEWER date brings it
+        # back to the lists.
         if banned is not None and resolved["asin"] in banned:
-            continue
+            src_date = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"], "")
+            if not _dt_after(src_date, banned[resolved["asin"]]):
+                continue                               # still inside the ban
+            banned.pop(resolved["asin"], None)         # re-published later -> back
 
         lid = resolved["id"]
         if lid in seen_ids:
@@ -1635,9 +1657,11 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if not r["date"]:                       # web source: first-seen date
             r["date"] = seen.get(r["url"]) or now_iso
             seen[r["url"]] = r["date"]
-        # Same absolute reference-source ban as ASINs, keyed by the clean URL.
+        # Same windowed reference-source ban as ASINs, keyed by the clean URL.
         if banned is not None and r["url"] in banned:
-            continue
+            if not _dt_after(r["date"], banned[r["url"]]):
+                continue
+            banned.pop(r["url"], None)
         if not r.get("coupon"):
             r.pop("coupon", None)
         links.append(r)
