@@ -914,8 +914,15 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
         log.error("dez: %s", e)
         return out
     seen = set()
+    _dbg = 0
     for p in promos:
         if (p.get("store") or "").lower() != "amazon":
+            if _dbg < 4:   # DIAG (temp): shape of non-amazon entries, sanitized
+                _dbg += 1
+                safe = {k: (v[:60] if isinstance(v, str) else v) for k, v in p.items()
+                        if k in ("store", "productId", "title", "coupon", "updatedAt",
+                                 "promoDay", "url", "link", "productUrl", "deeplink", "slug", "id")}
+                log.info("dez-dbg keys=%s sample=%s", sorted(p.keys()), safe)
             continue
         asin = (p.get("productId") or "").strip().upper()
         if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
