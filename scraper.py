@@ -1516,14 +1516,40 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                             "name": name or (_clean_name(slug) if len(slug) > 3 else "Produto Worten"),
                             "coupon": extract_coupon_code(text)})
 
+    # Tabs that show EVERYTHING their channels publish: any other store's
+    # product link becomes a badged row too (Amazon/Worten handled elsewhere).
+    show_all = state_key in ("data/nas.json", "data/descontos.json")
+    _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp", re.I)
+
+    def _other_collect(h, date="", name=""):
+        for u in re.findall(r'href="(https?://[^"]+)"', h or ""):
+            u2 = html.unescape(u)
+            if AMAZON_HOST_RE.search(u2) or CUSTOM_ASIN_RE.search(u2) or _OTHER_SKIP.search(u2):
+                continue
+            u2 = re.sub(r"[?#].*$", "", u2).rstrip(").,;/")
+            path = u2.split("/", 3)[-1] if u2.count("/") >= 3 else ""
+            if len(path) < 4 or u2 in wt_seen:   # homepage/nav links out
+                continue
+            wt_seen.add(u2)
+            host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
+            parts = host.split(".")
+            brand = ("aliexpress" if "aliexpress" in host
+                     else parts[-2] if len(parts) >= 2 else host)
+            shop = {"aliexpress": "AliExpress", "pccomponentes": "PCComponentes"}.get(
+                brand, brand.capitalize())
+            wt_rows.append({"url": u2, "date": date, "shop": shop,
+                            "name": name or "Produto " + shop,
+                            "coupon": extract_coupon_code(h)})
+
     posts: list[tuple[datetime | None, list[str]]] = []
     for channel in channels:
         for post in get_telegram_link_posts(channel):
+            dt_iso = post["dt"].isoformat() if post["dt"] else ""
             # Tracked non-Amazon stores go to their own transversal tabs.
-            store_scan_text(post["html"], post["dt"].isoformat() if post["dt"] else "",
-                            _post_text_name(post["html"]))
-            _wt_collect(post["html"], post["dt"].isoformat() if post["dt"] else "",
-                        _post_text_name(post["html"]))
+            store_scan_text(post["html"], dt_iso, _post_text_name(post["html"]))
+            _wt_collect(post["html"], dt_iso, _post_text_name(post["html"]))
+            if show_all:
+                _other_collect(post["html"], dt_iso, _post_text_name(post["html"]))
             urls = extract_amazon_urls(post["html"])
             if urls:
                 posts.append((post["dt"], urls))
