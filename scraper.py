@@ -436,6 +436,9 @@ def extract_coupon_code(text: str) -> str:
 # ---------------------------------------------------------------------------
 STORE_TAB_KEYS = {"aliexpress": "data/aliexpress.json", "pcc": "data/pccomponentes.json"}
 _STORE_ITEMS: dict = {"aliexpress": [], "pcc": []}   # reset at the start of each run
+# Non-Amazon rows a provider queues for its OWN tab (state_key -> [row dicts]);
+# drained by scan_amazon_list and shown with a store badge. Reset per run.
+_EXTRA_ROWS: dict = {}
 _STORE_PATTERNS = (
     ("aliexpress", re.compile(r"https?://(?:s\.click\.|[a-z]{2}\.|www\.)?aliexpress\.[a-z.]{2,6}/[^\s\"'<>\\]+", re.I)),
     ("pcc", re.compile(r"https?://(?:www\.)?pccomponentes\.(?:com|pt)/[^\s\"'<>\\]+", re.I)),
@@ -914,15 +917,28 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
         log.error("dez: %s", e)
         return out
     seen = set()
-    _dbg = 0
     for p in promos:
-        if (p.get("store") or "").lower() != "amazon":
-            if _dbg < 4:   # DIAG (temp): shape of non-amazon entries, sanitized
-                _dbg += 1
-                safe = {k: (v[:80] if isinstance(v, str) else v) for k, v in p.items()
-                        if k in ("store", "promoLink", "image", "currentPrice",
-                                 "normalPrice", "coupon")}
-                log.info("dez-dbg keys=%s sample=%s", sorted(p.keys()), safe)
+        st_raw = (p.get("store") or "").lower()
+        if st_raw != "amazon":
+            # Everything ELSE the source publishes (AliExpress, Prozis, Worten,
+            # any store) joins the DEZ tab too, badged with its store name.
+            link = (p.get("promoLink") or "").strip()
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            shop = {"aliexpress": "AliExpress", "pccomponentes": "PCComponentes"}.get(
+                st_raw, st_raw.capitalize() or "Loja")
+            row = {"name": _clean_name(p.get("title", "")), "url": link,
+                   "date": p.get("updatedAt") or p.get("promoDay") or "",
+                   "shop": shop}
+            if (p.get("coupon") or "").strip():
+                row["coupon"] = p["coupon"].strip()
+            _EXTRA_ROWS.setdefault("data/dez.json", []).append(row)
+            # Tracked stores also feed their own transversal tabs.
+            if st_raw == "aliexpress":
+                store_add("aliexpress", link, row["date"], row.get("coupon", ""), row["name"])
+            elif "pccomponentes" in st_raw:
+                store_add("pcc", link, row["date"], row.get("coupon", ""), row["name"])
             continue
         asin = (p.get("productId") or "").strip().upper()
         if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
@@ -1320,6 +1336,7 @@ def scrape_amazon_links():
         cleared.add(u.split("?", 1)[0])
     for v in _STORE_ITEMS.values():    # fresh transversal store collector this run
         v.clear()
+    _EXTRA_ROWS.clear()                # fresh per-tab non-Amazon rows this run
 
     # Cross-check EVERY list against the reference source on every run. Any
     # product seen there (ASIN or Worten URL) is banned while inside its 12h
@@ -1675,6 +1692,21 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     if wt_rows:
         log.info("[%s] +%d worten rows", state_key, len(wt_rows))
 
+    # Non-Amazon rows the provider queued for this tab (badged by store).
+    extra = _EXTRA_ROWS.pop(state_key, [])
+    for r in extra:
+        if r["url"] in cleared or any(l["url"] == r["url"] for l in links):
+            continue
+        if banned is not None and r["url"] in banned:
+            if not _dt_after(r.get("date", ""), banned[r["url"]]):
+                continue
+            banned.pop(r["url"], None)
+        if not r.get("coupon"):
+            r.pop("coupon", None)
+        links.append(r)
+    if extra:
+        log.info("[%s] +%d non-amazon store rows", state_key, len(extra))
+
     # All-time-low (Keepa) BEFORE writing: price this tab's ASINs that aren't
     # fresh in the cache (shared per-run budget protects tokens), so the dot is
     # correct the moment the deal appears — no one-run delay.
@@ -1904,7 +1936,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, shop:l.shop||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -2023,9 +2055,10 @@ function render(){
     const dupStyle = l.x > 1
       ? ' style="background:rgba(255,153,0,'+Math.min(0.10 + (l.x-2)*0.09, 0.40).toFixed(2)+')" title="Em '+l.x+' listas"'
       : '';
-    // Worten deal: marked differently (red edge + badge).
-    const wbadge = l.wt ? '<span class="tag wtag">Worten</span>' : '';
-    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(l.wt?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+    // Non-Amazon deal: marked differently (red edge + store-name badge).
+    const shopName = l.shop || (l.wt ? 'Worten' : '');
+    const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
+    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
       th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
