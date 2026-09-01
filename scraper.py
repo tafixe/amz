@@ -1518,28 +1518,67 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
 
     # Tabs that show EVERYTHING their channels publish: any other store's
     # product link becomes a badged row too (Amazon/Worten handled elsewhere).
+    # Generic shorteners (t.ly, bit.ly, ...) are resolved ONCE (cached per tab);
+    # challenge-walled ones keep the short link and take the store name from
+    # the post text instead.
     show_all = state_key in ("data/nas.json", "data/descontos.json")
-    _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp", re.I)
+    scache = existing.get("scache", {})   # shortener url -> final url ("" = unresolvable)
+    _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp|facebook|instagram", re.I)
+    _GENERIC_SHORT = ("t.ly", "bit.ly", "tinyurl.com", "cutt.ly", "rb.gy", "is.gd",
+                      "s.id", "shorturl.at", "tny.im", "rebrand.ly")
+    _SHOP_WORDS = ("aliexpress", "worten", "prozis", "pccomponentes", "fnac",
+                   "mediamarkt", "decathlon", "lidl", "continente", "ikea", "shein",
+                   "temu", "notino", "pcdiga", "radiopopular", "auchan", "wells")
+
+    def _shop_label(host_or_text, from_text=False):
+        s = host_or_text.lower()
+        for w in _SHOP_WORDS:
+            if w in s.replace(" ", ""):
+                return {"aliexpress": "AliExpress", "pccomponentes": "PCComponentes"}.get(
+                    w, w.capitalize())
+        if from_text:
+            return "Outra loja"
+        parts = re.sub(r"^www\.", "", s).split(".")
+        return (parts[-2] if len(parts) >= 2 else s).capitalize()
 
     def _other_collect(h, date="", name=""):
+        found_amz = []
         for u in re.findall(r'href="(https?://[^"]+)"', h or ""):
             u2 = html.unescape(u)
             if AMAZON_HOST_RE.search(u2) or CUSTOM_ASIN_RE.search(u2) or _OTHER_SKIP.search(u2):
                 continue
             u2 = re.sub(r"[?#].*$", "", u2).rstrip(").,;/")
+            host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
+            shop = ""
+            if host in _GENERIC_SHORT:
+                final = scache.get(u2)
+                if final is None:                 # never tried: open it ONCE
+                    try:
+                        final = requests.get(u2, headers=_BROWSER_HEADERS, timeout=20,
+                                             allow_redirects=True).url
+                    except requests.RequestException:
+                        continue                  # retried next run
+                    fh = re.sub(r"^www\.", "", urlparse(final).netloc.lower())
+                    if fh in _GENERIC_SHORT:      # challenge page, went nowhere
+                        final = ""
+                    scache[u2] = final
+                if final:
+                    if AMAZON_HOST_RE.search(final):
+                        found_amz.append(final)   # joins the normal Amazon flow
+                        continue
+                    u2 = re.sub(r"[?#].*$", "", final).rstrip(").,;/")
+                    host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
+                else:                             # unresolvable: badge from text
+                    shop = _shop_label(re.sub(r"<[^>]+>", " ", h), from_text=True)
             path = u2.split("/", 3)[-1] if u2.count("/") >= 3 else ""
-            if len(path) < 4 or u2 in wt_seen:   # homepage/nav links out
+            if (not shop and len(path) < 4) or u2 in wt_seen:   # homepage/nav out
                 continue
             wt_seen.add(u2)
-            host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
-            parts = host.split(".")
-            brand = ("aliexpress" if "aliexpress" in host
-                     else parts[-2] if len(parts) >= 2 else host)
-            shop = {"aliexpress": "AliExpress", "pccomponentes": "PCComponentes"}.get(
-                brand, brand.capitalize())
+            shop = shop or _shop_label(host)
             wt_rows.append({"url": u2, "date": date, "shop": shop,
                             "name": name or "Produto " + shop,
                             "coupon": extract_coupon_code(h)})
+        return found_amz
 
     posts: list[tuple[datetime | None, list[str]]] = []
     for channel in channels:
@@ -1548,9 +1587,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             # Tracked non-Amazon stores go to their own transversal tabs.
             store_scan_text(post["html"], dt_iso, _post_text_name(post["html"]))
             _wt_collect(post["html"], dt_iso, _post_text_name(post["html"]))
-            if show_all:
-                _other_collect(post["html"], dt_iso, _post_text_name(post["html"]))
+            extra_amz = (_other_collect(post["html"], dt_iso, _post_text_name(post["html"]))
+                         if show_all else [])
             urls = extract_amazon_urls(post["html"])
+            urls += [u for u in extra_amz if u not in urls]
             if urls:
                 posts.append((post["dt"], urls))
                 cpn = extract_coupon_code(post["html"])   # code is in the post body
@@ -1797,7 +1837,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # (hash of the URL) so it stays stable across the 10-min refreshes.
         links.sort(key=lambda l: hashlib.md5(l["url"].encode("utf-8")).hexdigest())
 
-    data = {"updated": now_iso, "links": links, "cache": cache, "names": names, "seen": seen}
+    if len(scache) > 3000:
+        scache = dict(list(scache.items())[-3000:])
+    data = {"updated": now_iso, "links": links, "cache": cache, "names": names,
+            "seen": seen, "scache": scache}
     r2_put_amazon_links(data, state_key)
     log.info("[%s] complete: %d links, resolved %d new, deferred %d, titles %d",
              state_key, len(links), resolved_this_run, deferred, titles_this_run)
