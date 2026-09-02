@@ -1138,6 +1138,56 @@ def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+def get_g4_items() -> list[tuple[str, str, str, bool, str]]:
+    """Tech-news site (WordPress, REST API disabled): its RSS feed carries the
+    full article HTML, and deal articles link products via Amazon short links —
+    several per round-up article. Product name = the longest non-CTA anchor
+    text on that link (the same link also appears on the image and on a
+    'Comprar' button); date = the article's pubDate.
+    Returns (amazon_url, iso_date, coupon, low, name) tuples."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    feed = SOURCES.get("g4_feed", "") or os.environ.get("G4_FEED", "")
+    if not feed:
+        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    try:
+        x = sess.get(feed, timeout=40).text
+    except requests.RequestException as e:
+        log.error("g4 feed: %s", e)
+        return out
+    seen = set()
+    CTA = re.compile(r"^(comprar|compra|ver|aqui|amazon|link|loja|clica)\b", re.I)
+    for it in re.findall(r"<item>(.*?)</item>", x, re.S):
+        cm = re.search(r"<content:encoded>(.*?)</content:encoded>", it, re.S)
+        if not cm:
+            continue
+        body = html.unescape(cm.group(1))
+        pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+        date = ""
+        if pd:
+            try:  # RFC822 -> zoned ISO so it sorts chronologically
+                date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
+            except Exception:
+                date = ""
+        store_scan_text(body, date)   # transversal AliExpress/PCC collector
+        names: dict = {}
+        for m in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', body, re.S):
+            href, txt = m.group(1), _clean_name(re.sub(r"<[^>]+>", "", m.group(2)))
+            if not AMAZON_HOST_RE.search(href):
+                continue
+            if len(txt) >= 8 and not CTA.match(txt) and len(txt) > len(names.get(href, "")):
+                names[href] = txt
+        coupon = extract_coupon_code(body)
+        for u in extract_amazon_urls(body):
+            if u in seen:
+                continue
+            seen.add(u)
+            out.append((u, date, coupon, False, names.get(u, "")))
+    log.info("g4: %d amazon links from feed", len(out))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Bom tab: a coupon/discount site (WordPress). The REST API lists the newest
 # offers (title + date; the category IS the store). The coupon code sits on
@@ -1388,6 +1438,7 @@ def scrape_amazon_links():
         ([], [], get_titas_items, "data/titas.json"),
         ([], [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
+        ([], [], get_g4_items, "data/g4.json"),
     ]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
@@ -1395,7 +1446,7 @@ def scrape_amazon_links():
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
-                                "data/terapia.json", "data/dib.json")
+                                "data/terapia.json", "data/dib.json", "data/g4.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
         # Fair share of the Keepa token budget: a tab may spend at most its slice
@@ -1978,6 +2029,7 @@ const TABS = [
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
+  { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
   { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
