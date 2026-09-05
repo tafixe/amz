@@ -347,19 +347,36 @@ def get_telegram_link_posts(channel: str) -> list[dict]:
 AMAZON_CLEARED_KEY = "data/cleared.json"
 
 
-def r2_get_amazon_cleared() -> set:
-    """URLs the admin cleared — excluded so they never come back."""
+def r2_get_amazon_cleared() -> dict:
+    """Hidden-on-open map {url: date of the row when it was hidden}. A row is
+    hidden only while its date is not newer than that stamp, so a re-publish
+    by the source brings it back. Legacy list form -> hidden as of now."""
     if not CF_API_TOKEN:
-        return set()
+        return {}
     url = f"{AMAZON_API_BASE}/objects/{quote(AMAZON_CLEARED_KEY, safe='')}"
     try:
         resp = requests.get(url, headers=r2_headers(), timeout=30)
         if resp.status_code == 200:
-            return set(resp.json())
+            j = resp.json()
+            if isinstance(j, list):
+                now = datetime.now(timezone.utc).isoformat()
+                return {u: now for u in j}
+            if isinstance(j, dict):
+                return j
     except Exception as e:
-        log.warning("Failed to load cleared list: %s", e)
-    return set()
+        log.warning("Failed to load hidden map: %s", e)
+    return {}
 
+
+def _hidden(cleared: dict, url: str, date: str) -> bool:
+    """True while the row's publication date is not newer than the hide stamp."""
+    d = cleared.get(url)
+    if d is None:
+        return False
+    pa, pb = _parse_dt(date), _parse_dt(d)
+    if pa and pb:
+        return pa <= pb
+    return True
 
 def r2_get_amazon_links(key: str = AMAZON_STATE_KEY) -> dict:
     """Load the stored Amazon links state from R2 (or local fallback)."""
@@ -538,7 +555,7 @@ def _store_row_score(store: str, l: dict) -> int:
     return s
 
 
-def write_store_tabs(cleared: set):
+def write_store_tabs(cleared: dict):
     """Merge this run's collected store links into each tab's state in R2:
     dedupe by product, keep first-seen dates, drop opened/cleared, newest first."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -549,7 +566,9 @@ def write_store_tabs(cleared: set):
         for it in _STORE_ITEMS.get(store) or []:
             k = _store_dedupe_key(it["url"])
             prev = merged.get(k)
-            if prev:   # upgrade what we now know; keep the original date
+            if prev:   # upgrade what we now know; newer date = re-published
+                if it.get("date") and it["date"] > (prev.get("date") or ""):
+                    prev["date"] = it["date"]
                 if it.get("coupon") and not prev.get("coupon"):
                     prev["coupon"] = it["coupon"]
                 pn = prev.get("name") or ""
@@ -560,7 +579,7 @@ def write_store_tabs(cleared: set):
                 it["date"] = it.get("date") or now_iso
                 merged[k] = it
                 fresh += 1
-        links = [l for l in merged.values() if l.get("url") and l["url"] not in cleared]
+        links = [l for l in merged.values() if l.get("url") and not _hidden(cleared, l["url"], l.get("date", ""))]
         # Collapse cross-source duplicates of the same product (direct link vs
         # deal page vs second short link). Best row wins; coupon and freshest
         # date are inherited from the dropped copies.
@@ -1204,7 +1223,7 @@ BOM_MAP_KEY = "data/bom_map.json"
 BOM_MAX_FETCH = int(os.environ.get("BOM_MAX_FETCH", "15"))
 
 
-def write_bom_tab(cleared: set):
+def write_bom_tab(cleared: dict):
     base = (os.environ.get("BOM_URL", "") or SOURCES.get("bom_url", "")).rstrip("/")
     if not base:
         return
@@ -1322,7 +1341,7 @@ def write_bom_tab(cleared: set):
             l["coupon"] = e["c"]
         if e.get("u"):
             l["val"] = e["u"]      # "dd/mm" validity
-        if l["name"] and url and url not in cleared:
+        if l["name"] and url and not _hidden(cleared, url, date):
             links.append(l)
     links.sort(key=lambda l: l.get("date", ""), reverse=True)
 
@@ -1386,7 +1405,7 @@ def scrape_amazon_links():
     # keep matching now that URLs are clean. Additive, so store-tab URLs (which
     # legitimately have query strings) are untouched.
     for u in [u for u in cleared if "/dp/" in u and "?" in u]:
-        cleared.add(u.split("?", 1)[0])
+        cleared.setdefault(u.split("?", 1)[0], cleared[u])
     for v in _STORE_ITEMS.values():    # fresh transversal store collector this run
         v.clear()
     _EXTRA_ROWS.clear()                # fresh per-tab non-Amazon rows this run
@@ -1734,7 +1753,9 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # links went clean.
         if "?" in (resolved.get("affiliate_url") or ""):
             resolved["affiliate_url"] = resolved["affiliate_url"].split("?", 1)[0]
-        if resolved["affiliate_url"] in cleared:  # admin cleared this one
+        # Hidden-on-open, per publication (re-published with a newer date -> back).
+        _cd = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"]) or now_iso
+        if _hidden(cleared, resolved["affiliate_url"], _cd):
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
             continue   # already on an earlier tab this run — keep tabs unique
@@ -1796,7 +1817,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
 
     # Worten rows join this tab's list (marked; no ASIN so Keepa skips them).
     for r in wt_rows:
-        if r["url"] in cleared:
+        if _hidden(cleared, r["url"], r["date"] or seen.get(r["url"]) or now_iso):
             continue
         if not r["date"]:                       # web source: first-seen date
             r["date"] = seen.get(r["url"]) or now_iso
@@ -1815,7 +1836,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Non-Amazon rows the provider queued for this tab (badged by store).
     extra = _EXTRA_ROWS.pop(state_key, [])
     for r in extra:
-        if r["url"] in cleared or any(l["url"] == r["url"] for l in links):
+        if _hidden(cleared, r["url"], r.get("date") or now_iso) or any(l["url"] == r["url"] for l in links):
             continue
         if banned is not None and r["url"] in banned:
             if not _dt_after(r.get("date", ""), banned[r["url"]]):
@@ -2044,7 +2065,10 @@ let query = "";
 let sortByDate = localStorage.getItem("amzSortTg") === "1";  // Telegram: sort by date
 const cache = {};   // id -> normalized [{name,url,extra,disc}]
 const NEW = {};     // id -> has unseen links (green dot)
-let serverHidden = new Set();   // URLs hidden server-side (synced across all devices)
+let serverHidden = new Map();   // url -> date of the row when hidden (all devices)
+// Hidden only while the row's publication date is not newer than the stamp:
+// a re-publish by the source (newer date) brings the deal back.
+function isHidden(l){ const d = serverHidden.get(l.url); if (d === undefined) return false; if (!l.date || !d) return true; return l.date <= d; }
 
 function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function lsGet(k){ try { return new Set(JSON.parse(localStorage.getItem(k)||"[]")); } catch(e){ return new Set(); } }
@@ -2082,12 +2106,12 @@ async function fetchTab(tab){
 async function loadHidden(){
   try {
     const r = await fetch("/data/cleared.json?t="+Date.now());
-    if (r.ok) serverHidden = new Set(await r.json());
+    if (r.ok) { const j = await r.json(); serverHidden = Array.isArray(j) ? new Map(j.map(u => [u, ""])) : new Map(Object.entries(j || {})); }
   } catch(e) {}
 }
-function hideOnServer(urls){
-  fetch("/api/hide", { method:"POST", credentials:"same-origin",
-    headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ urls }) }).catch(()=>{});
+function hideOnServer(items){
+  try { fetch("/api/hide", { method:"POST", credentials:"same-origin",
+    headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ items }) }); } catch(e) {}
 }
 
 async function loadTab(tab){
@@ -2104,7 +2128,7 @@ function visibleItems(){
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
-        if (th.has(l.url) || serverHidden.has(l.url) || seenUrl.has(l.url)) continue;
+        if ((t.kind === "tg" ? isHidden(l) : th.has(l.url)) || seenUrl.has(l.url)) continue;
         if (!(l.name||"").toLowerCase().includes(q)) continue;
         seenUrl.add(l.url);
         out.push(Object.assign({}, l, { srcTab: t.label }));
@@ -2113,7 +2137,7 @@ function visibleItems(){
     return out;
   }
   const h = hiddenSet(current.id);
-  let items = (cache[current.id]||[]).filter(l => !h.has(l.url) && (current.kind!=="tg" || !serverHidden.has(l.url)));
+  let items = (cache[current.id]||[]).filter(l => current.kind === "tg" ? !isHidden(l) : !h.has(l.url));
   if (current.id === "tg" && sortByDate) {  // newest first, by post date
     items = items.slice().sort((a, b) => (b.date||"").localeCompare(a.date||""));
   }
@@ -2182,7 +2206,7 @@ function render(){
     // Non-Amazon deal: marked differently (red edge + store-name badge).
     const shopName = l.shop || (l.wt ? 'Worten' : '');
     const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
-    const row = '<li data-url="'+esc(l.url)+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
+    const row = '<li data-url="'+esc(l.url)+'" data-date="'+esc(l.date||"")+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
       th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
@@ -2227,7 +2251,7 @@ async function refreshDots(){
   await Promise.all(TABS.filter(t => t.kind === "tg").map(async t => {
     await fetchTab(t);
     const known = knownSet(t.id);
-    NEW[t.id] = (cache[t.id]||[]).some(l => !known.has(l.url) && !serverHidden.has(l.url));
+    NEW[t.id] = (cache[t.id]||[]).some(l => !known.has(l.url) && !isHidden(l));
   }));
   applyDots();
 }
@@ -2249,8 +2273,9 @@ document.getElementById("list").addEventListener("click", function(e){
   if (!li || !li.dataset.url) return;
   if (current.kind === "tg") {                                       // hide everywhere
     const u = li.dataset.url;
-    lsAdd("amzHidden_"+current.id, [u]); serverHidden.add(u);
-    hideOnServer([u]); li.remove();
+    const d = li.dataset.date || "";
+    serverHidden.set(u, d || new Date().toISOString());
+    hideOnServer([{url:u, date:d}]); li.remove();
   } else { markVisited(li.dataset.url); a.classList.add("visited"); }  // static: green
 });
 document.getElementById("sortBtn").addEventListener("click", function(){
@@ -2264,13 +2289,12 @@ document.getElementById("search").addEventListener("input", function(){ query = 
 // "Limpar tudo" on every tab: hide all links currently in this tab (this browser).
 document.getElementById("clearBtn").addEventListener("click", function(){
   if (!confirm("Limpar todos os links desta lista?")) return;
-  const urls = urlsOf(current.id);
-  lsAdd("amzHidden_"+current.id, urls);
-  lsAdd("amzKnown_"+current.id, urls);
-  if (current.kind === "tg" && urls.length) {                      // hide everywhere
-    urls.forEach(u => serverHidden.add(u));
-    hideOnServer(urls);
-  }
+  const items = (cache[current.id]||[]).map(l => ({ url:l.url, date:l.date||"" }));
+  lsAdd("amzKnown_"+current.id, items.map(i => i.url));
+  if (current.kind === "tg" && items.length) {                     // hide everywhere
+    items.forEach(i => serverHidden.set(i.url, i.date || new Date().toISOString()));
+    hideOnServer(items);
+  } else { lsAdd("amzHidden_"+current.id, items.map(i => i.url)); }
   render();
 });
 

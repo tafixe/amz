@@ -180,23 +180,49 @@ export default {
       });
     }
 
-    // POST /api/hide — hide one or more links for ALL devices (server-side).
-    // Appends to the same cleared set the scraper already excludes, so an
-    // opened/hidden deal disappears everywhere and never comes back.
-    if (request.method === "POST" && url.pathname === "/api/hide") {
-      let urls = [];
-      try { const b = await request.json(); urls = b.urls || (b.url ? [b.url] : []); } catch (e) {}
-      urls = urls.filter((u) => typeof u === "string" && u);
-      if (urls.length) {
-        let cleared = [];
-        const cl = await env.BUCKET.get(CLEARED_KEY);
-        if (cl) { try { cleared = await cl.json(); } catch (e) {} }
-        cleared = [...new Set([...cleared, ...urls])].slice(-MAX_CLEARED);
-        await env.BUCKET.put(CLEARED_KEY, JSON.stringify(cleared), {
-          httpMetadata: { contentType: "application/json" },
-        });
+    // Hidden-on-open, PER PUBLICATION: {url: date of the row when hidden}.
+    // The scraper drops a row only while its date is not newer than that
+    // stamp, so a re-publish by the source (newer date, e.g. a price drop)
+    // brings it back. Entries expire after 30 days — nothing is kept for good.
+    async function loadHidden() {
+      let h = {};
+      const cl = await env.BUCKET.get(CLEARED_KEY);
+      if (cl) {
+        try {
+          const j = await cl.json();
+          if (Array.isArray(j)) { const now = new Date().toISOString(); for (const u of j) h[u] = now; }
+          else if (j && typeof j === "object") h = j;
+        } catch (e) {}
       }
-      return Response.json({ ok: true, hidden: urls.length }, { headers: cors });
+      return h;
+    }
+    async function saveHidden(h) {
+      const cutoff = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+      const kept = {};
+      for (const [u, d] of Object.entries(h)) if (!d || d >= cutoff) kept[u] = d;
+      const keys = Object.keys(kept).slice(-MAX_CLEARED);
+      const out = {}; for (const k of keys) out[k] = kept[k];
+      await env.BUCKET.put(CLEARED_KEY, JSON.stringify(out), {
+        httpMetadata: { contentType: "application/json" },
+      });
+    }
+
+    // POST /api/hide — body {items:[{url,date}]} (legacy {urls:[...]} / {url}).
+    if (request.method === "POST" && url.pathname === "/api/hide") {
+      let items = [];
+      try {
+        const b = await request.json();
+        if (Array.isArray(b.items)) items = b.items;
+        else { const us = b.urls || (b.url ? [b.url] : []); items = us.map((u) => ({ url: u, date: "" })); }
+      } catch (e) {}
+      items = items.filter((i) => i && typeof i.url === "string" && i.url);
+      if (items.length) {
+        const h = await loadHidden();
+        const now = new Date().toISOString();
+        for (const it of items) h[it.url] = (typeof it.date === "string" && it.date) ? it.date : now;
+        await saveHidden(h);
+      }
+      return Response.json({ ok: true, hidden: items.length }, { headers: cors });
     }
 
     // POST /api/clear — hide every current Telegram link for all devices.
@@ -204,22 +230,12 @@ export default {
       let data = { links: [] };
       const cur = await env.BUCKET.get(LINKS_KEY);
       if (cur) { try { data = await cur.json(); } catch (e) {} }
-      const urls = (data.links || []).map((l) => l.url).filter(Boolean);
-
-      let cleared = [];
-      const cl = await env.BUCKET.get(CLEARED_KEY);
-      if (cl) { try { cleared = await cl.json(); } catch (e) {} }
-      cleared = [...new Set([...cleared, ...urls])].slice(-MAX_CLEARED);
-      await env.BUCKET.put(CLEARED_KEY, JSON.stringify(cleared), {
-        httpMetadata: { contentType: "application/json" },
-      });
-
-      data.links = [];
-      await env.BUCKET.put(LINKS_KEY, JSON.stringify(data, null, 2), {
-        httpMetadata: { contentType: "application/json" },
-      });
-
-      return Response.json({ ok: true, cleared: urls.length }, { headers: cors });
+      const now = new Date().toISOString();
+      const h = await loadHidden();
+      let n = 0;
+      for (const l of (data.links || [])) if (l.url) { h[l.url] = l.date || now; n++; }
+      await saveHidden(h);
+      return Response.json({ ok: true, cleared: n }, { headers: cors });
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
