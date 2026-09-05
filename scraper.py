@@ -940,8 +940,11 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
             elif "pccomponentes" in st_raw:
                 store_add("pcc", link, row["date"], row.get("coupon", ""), row["name"])
             continue
-        asin = (p.get("productId") or "").strip().upper()
-        if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
+        # productId is the ASIN, sometimes with a variant suffix ("B0XXXXXXXX-2")
+        # that used to make the whole promo get dropped — take the ASIN prefix.
+        pm = re.match(r"([A-Z0-9]{10})(?:-\d+)?$", (p.get("productId") or "").strip().upper())
+        asin = pm.group(1) if pm else ""
+        if not asin or asin in seen:
             continue
         if asin in cupo_recent:       # on reference source in last 12h -> skip
             continue
