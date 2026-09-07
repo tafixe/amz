@@ -855,11 +855,6 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
                 stop = True
                 break
             content = (p.get("content", {}) or {}).get("rendered", "")
-            _hs = [re.sub(r"^https?://(www\.)?", "", u).split("/")[0] for u in re.findall(r'href="(https?://[^"]+)"', content)]
-            _self = re.sub(r"^https?://(www\.)?", "", base).split("/")[0]
-            _hs = ["SELF" if h == _self else h for h in _hs]
-            _t = re.sub(r"<[^>]+>", "", (p.get("title") or {}).get("rendered", ""))[:45]
-            log.info("ref-dbg | %s | %s", _t, sorted(set(_hs)))   # DIAG (temp)
             cupo_links += extract_amazon_urls(content)
             # Worten deals on the reference source hide behind an Awin short
             # link (tidd.ly) or a direct worten.pt link — collect both.
@@ -978,7 +973,7 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
         out.append((f"https://www.amazon.es/dp/{asin}",
                     p.get("updatedAt") or p.get("promoDay") or "",
                     (p.get("coupon") or "").strip(), False, _clean_name(p.get("title", ""))))
-    log.info("dez: %d promos -> %d kept (not on reference source last 12h)", len(promos), len(out))
+    log.info("dez: %d promos -> %d kept (not on reference source last %dh)", len(promos), len(out), REFERENCE_WINDOW_HOURS)
     return out
 
 
