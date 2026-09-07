@@ -77,7 +77,7 @@ AMAZON_BATCH_WINDOW_HOURS = int(os.environ.get("AMAZON_BATCH_WINDOW_HOURS", "24"
 # How far back to treat a reference-source post as "current" and exclude its
 # ASINs from every tab. The source re-promotes deals in the morning and keeps
 # them all day, so 24h (not 12h) covers a full promotion day.
-REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "12"))
+REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "8"))
 
 # Expanding short links (amzlink.to/amzn.to) costs one HTTP request each. We
 # cache resolutions in R2 and only resolve up to N new links per run so the
@@ -855,6 +855,11 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
                 stop = True
                 break
             content = (p.get("content", {}) or {}).get("rendered", "")
+            _hs = [re.sub(r"^https?://(www\.)?", "", u).split("/")[0] for u in re.findall(r'href="(https?://[^"]+)"', content)]
+            _self = re.sub(r"^https?://(www\.)?", "", base).split("/")[0]
+            _hs = ["SELF" if h == _self else h for h in _hs]
+            _t = re.sub(r"<[^>]+>", "", (p.get("title") or {}).get("rendered", ""))[:45]
+            log.info("ref-dbg | %s | %s", _t, sorted(set(_hs)))   # DIAG (temp)
             cupo_links += extract_amazon_urls(content)
             # Worten deals on the reference source hide behind an Awin short
             # link (tidd.ly) or a direct worten.pt link — collect both.
@@ -1482,7 +1487,7 @@ def scrape_amazon_links():
             slice_cap = fair[0]
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
-                                fair, banned, top_rank)
+                                fair, banned, top_rank, cupo_recent | cupo_worten)
         if price_budget and fair is not None:
             price_budget[0] -= slice_cap - fair[0]   # only what this tab spent
         results[state_key] = last
@@ -1552,7 +1557,7 @@ def _dt_after(a, b) -> bool:
     return bool(da and db and da > db)
 
 
-def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None, top_rank=None):
+def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exclude_asins=None, sort_by_date=False, name_map=None, keepa_tried=None, low_cache=None, all_asins=None, price_budget=None, banned=None, top_rank=None, cupo_now=None):
     """Build the freshest batch of clean affiliate links for one source list."""
     existing = r2_get_amazon_links(state_key)
     # Resolution cache: raw short/long URL -> resolved dict (avoids re-expanding).
@@ -1763,6 +1768,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # while the product stays fresh on the reference source; once that
         # window passes, a source publishing it with a NEWER date brings it
         # back to the lists.
+        # On the reference source RIGHT NOW (inside its window): hidden, no
+        # exceptions — a source's fresher timestamp must not bring it back.
+        if cupo_now and resolved["asin"] in cupo_now:
+            continue
         if banned is not None and resolved["asin"] in banned:
             src_date = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"], "")
             if not _dt_after(src_date, banned[resolved["asin"]]):
@@ -1823,6 +1832,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             r["date"] = seen.get(r["url"]) or now_iso
             seen[r["url"]] = r["date"]
         # Same windowed reference-source ban as ASINs, keyed by the clean URL.
+        if cupo_now and r["url"] in cupo_now:
+            continue
         if banned is not None and r["url"] in banned:
             if not _dt_after(r["date"], banned[r["url"]]):
                 continue
