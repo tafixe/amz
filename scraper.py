@@ -935,6 +935,19 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     except (requests.RequestException, ValueError) as e:
         log.error("dez: %s", e)
         return out
+    # Publication date = the last time the promo's PRICE changed (or first
+    # sight), persisted per promo. The source's updatedAt is touched on every
+    # re-check, which would un-hide opened deals every few minutes; a real
+    # price drop still brings them back.
+    DEZ_PUB_KEY = "data/dez_pub.json"
+    pub: dict = r2_get_amazon_links(DEZ_PUB_KEY).get("p", {})
+
+    def _pubdate(key, price, upd):
+        e = pub.get(key)
+        if not e or e[0] != price:
+            pub[key] = [price, upd or ""]
+        return pub[key][1]
+
     seen = set()
     for p in promos:
         st_raw = (p.get("store") or "").lower()
@@ -948,7 +961,8 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
             shop = {"aliexpress": "AliExpress", "pccomponentes": "PCComponentes"}.get(
                 st_raw, st_raw.capitalize() or "Loja")
             row = {"name": _clean_name(p.get("title", "")), "url": link,
-                   "date": p.get("updatedAt") or p.get("promoDay") or "",
+                   "date": _pubdate(link, p.get("currentPrice"),
+                                    p.get("updatedAt") or p.get("promoDay") or ""),
                    "shop": shop}
             if (p.get("coupon") or "").strip():
                 row["coupon"] = p["coupon"].strip()
@@ -971,8 +985,12 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
         # The all-time-low flag is now computed transversally (Keepa, all tabs),
         # so just pass the date/coupon/name here.
         out.append((f"https://www.amazon.es/dp/{asin}",
-                    p.get("updatedAt") or p.get("promoDay") or "",
+                    _pubdate(asin, p.get("currentPrice"),
+                             p.get("updatedAt") or p.get("promoDay") or ""),
                     (p.get("coupon") or "").strip(), False, _clean_name(p.get("title", ""))))
+    if len(pub) > 5000:
+        pub = dict(list(pub.items())[-5000:])
+    r2_put_amazon_links({"p": pub}, DEZ_PUB_KEY)
     log.info("dez: %d promos -> %d kept (not on reference source last %dh)", len(promos), len(out), REFERENCE_WINDOW_HOURS)
     return out
 
@@ -2112,12 +2130,49 @@ async function fetchTab(tab){
 async function loadHidden(){
   try {
     const r = await fetch("/data/cleared.json?t="+Date.now());
-    if (r.ok) { const j = await r.json(); serverHidden = Array.isArray(j) ? new Map(j.map(u => [u, ""])) : new Map(Object.entries(j || {})); }
+    if (r.ok) {
+      const j = await r.json();
+      serverHidden = Array.isArray(j) ? new Map(j.map(u => [u, ""])) : new Map(Object.entries(j || {}));
+      // Re-assert hides made on this device that the server does not carry.
+      const lost = [];
+      for (const [u, rec] of Object.entries(recentHides())) {
+        const sd = serverHidden.get(u);
+        if (sd === undefined || (rec.d && sd < rec.d)) { serverHidden.set(u, rec.d); lost.push({ url:u, date:rec.d }); }
+      }
+      if (lost.length) { hideQueue.push(...lost); pumpHides(); }
+    }
+  } catch(e) {}
+}
+// Hides go through ONE serialized queue: parallel requests were racing on the
+// server's read-modify-write and the last writer could drop another click's
+// hide (the deal then came back on the next refresh). Recent hides are also
+// remembered locally and re-asserted if the server ever lacks them.
+let hideQueue = [], hideBusy = false;
+function recentHides(){ try { return JSON.parse(localStorage.getItem("amzRecentHides")||"{}"); } catch(e){ return {}; } }
+function rememberHides(items){
+  try {
+    const r = recentHides(), now = Date.now();
+    for (const it of items) r[it.url] = { d: it.date || new Date().toISOString(), t: now };
+    for (const u of Object.keys(r)) if (now - (r[u].t||0) > 48*3600*1000) delete r[u];
+    localStorage.setItem("amzRecentHides", JSON.stringify(r));
   } catch(e) {}
 }
 function hideOnServer(items){
-  try { fetch("/api/hide", { method:"POST", credentials:"same-origin",
-    headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ items }) }); } catch(e) {}
+  rememberHides(items);
+  hideQueue.push(...items);
+  pumpHides();
+}
+async function pumpHides(){
+  if (hideBusy || !hideQueue.length) return;
+  hideBusy = true;
+  const batch = hideQueue.splice(0, hideQueue.length);
+  try {
+    const r = await fetch("/api/hide", { method:"POST", credentials:"same-origin",
+      headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ items: batch }) });
+    if (!r.ok) hideQueue.unshift(...batch);
+  } catch(e) { hideQueue.unshift(...batch); }
+  hideBusy = false;
+  if (hideQueue.length) setTimeout(pumpHides, 500);
 }
 
 async function loadTab(tab){
