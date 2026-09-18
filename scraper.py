@@ -2048,6 +2048,33 @@ def generate_amazon_html() -> str:
     background:var(--row); border:1px solid var(--border); color:var(--text);
     border-radius:10px; font-size:14px; cursor:pointer; }
   .empty { text-align:center; color:var(--muted); padding:50px 20px; font-size:14px; }
+  .theme-btn { background:transparent; border:1px solid var(--border); color:var(--muted);
+    font:700 12px ui-monospace,Menlo,Consolas,monospace; padding:5px 9px; border-radius:8px;
+    cursor:pointer; margin-left:6px; }
+  .theme-btn:hover { border-color:var(--brand); color:var(--brand); }
+  /* ===== DOS view: same data, one merged list, phosphor-green terminal look ===== */
+  body.dos { --bg:#000; --row:#000; --row-hover:#031; --border:#0a5a1e; --text:#00ff41;
+    --muted:#00a82b; --brand:#00ff41; --green:#00ff41; --red:#00ff41;
+    font-family:"Courier New",ui-monospace,Menlo,Consolas,monospace; }
+  body.dos::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:9;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px); }
+  body.dos * { border-radius:0 !important; font-family:inherit; }
+  body.dos #tabs, body.dos #clearBtn, body.dos #sortBtn { display:none !important; }
+  body.dos header { border-bottom:1px dashed var(--border); }
+  body.dos header h1 { font-size:0; }
+  body.dos header h1::before { content:"C:\\\\DEALS>"; font-size:14px; letter-spacing:1px; }
+  body.dos header h1::after { content:"_"; font-size:14px; animation:dosblink 1s steps(1) infinite; }
+  @keyframes dosblink { 50% { opacity:0; } }
+  body.dos .search { background:#000; border:1px dashed var(--border); color:var(--text); }
+  body.dos .search::placeholder { color:var(--muted); }
+  body.dos li a { background:#000; border-bottom:1px dashed #063d14; font-size:13px; padding:8px 12px; }
+  body.dos li a:hover { background:#00ff41 !important; }
+  body.dos li a:hover, body.dos li a:hover * { color:#000 !important; border-color:#000 !important; }
+  body.dos li .xn { color:var(--text); font-weight:700; margin-right:6px; }
+  body.dos li a.wt { box-shadow:inset 3px 0 0 #00ff41; }
+  body.dos li .tag.wtag { border-color:var(--border); color:var(--text); }
+  body.dos .low-dot { background:#00ff41; box-shadow:none; }
+  body.dos .theme-btn { border-color:var(--text); color:var(--text); }
 </style>
 </head>
 <body>
@@ -2057,6 +2084,7 @@ def generate_amazon_html() -> str:
     <span class="meta" id="meta"></span>
     <button class="sort-btn" id="sortBtn" title="Ordenar por data" style="display:none">Por data</button>
     <button class="clear-btn" id="clearBtn" title="Limpar esta lista">Limpar tudo</button>
+    <button class="theme-btn" id="themeBtn" title="Mudar tipo de lista">&gt;_</button>
   </div>
   <div class="tabs" id="tabs"></div>
   <input class="search" id="search" placeholder="Pesquisar em todas as tabs...">
@@ -2089,6 +2117,14 @@ let query = "";
 let sortByDate = localStorage.getItem("amzSortTg") === "1";  // Telegram: sort by date
 const cache = {};   // id -> normalized [{name,url,extra,disc}]
 const NEW = {};     // id -> has unseen links (green dot)
+// DOS view: same data, no tabs — ONE merged list, most-shared product first.
+let dosMode = false;
+try { dosMode = localStorage.getItem("amzTheme") === "dos"; } catch(e) {}
+function applyTheme(){
+  document.body.classList.toggle("dos", dosMode);
+  document.getElementById("search").placeholder = dosMode ? "C:\\\\> procurar_" : "Pesquisar em todas as tabs...";
+  document.title = dosMode ? "C:\\\\>" : "Links Amazon";
+}
 let serverHidden = new Map();   // url -> date of the row when hidden (all devices)
 // Hidden only while the row's publication date is not newer than the stamp:
 // a re-publish by the source (newer date) brings the deal back.
@@ -2184,6 +2220,19 @@ async function loadTab(tab){
 }
 
 function visibleItems(){
+  if (dosMode && !query) {   // one merged list: most-shared first, then newest
+    const best = new Map();
+    for (const t of TABS) {
+      const th = hiddenSet(t.id);
+      for (const l of (cache[t.id]||[])) {
+        if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
+        const p = best.get(l.url);
+        if (!p || (l.x||1) > (p.x||1)) best.set(l.url, l);
+      }
+    }
+    return [...best.values()].sort((a, b) =>
+      ((b.x||1) - (a.x||1)) || (b.date||"").localeCompare(a.date||""));
+  }
   if (query) {   // transversal search: matches from EVERY tab, tagged with origin
     const q = query.toLowerCase(), seenUrl = new Set(), out = [];
     for (const t of TABS) {
@@ -2223,7 +2272,7 @@ function render(){
   const useGreen = current.kind !== "tg";
   // Grouped mode (e.g. Bom): compact rows bucketed by store — stores ordered
   // by their newest offer, coupons first inside each store.
-  const grouping = !!current.group && !query;
+  const grouping = !!current.group && !query && !dosMode;
   box.classList.toggle("compact", grouping);
   let ordered = items, counts = {};
   if (grouping) {
@@ -2253,7 +2302,7 @@ function render(){
     // Click-to-copy coupon chip (stops the row link from opening).
     const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
     // During transversal search, show which tab the result came from.
-    const src = l.srcTab ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
+    const src = (l.srcTab && !dosMode) ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
     // Tiny product thumb, loaded by the browser straight from Amazon's CDN
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
     const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
@@ -2262,13 +2311,13 @@ function render(){
     const stref = l.net ? '<span class="stref" title="Plataforma de afiliação">'+esc(l.net)+'</span>' : '';
     // Deal on several lists: tint the row, stronger the more lists carry it.
     const dupStyle = l.x > 1
-      ? ' style="background:rgba(255,153,0,'+Math.min(0.10 + (l.x-2)*0.09, 0.40).toFixed(2)+')" title="Em '+l.x+' listas"'
+      ? ' style="background:rgba('+(dosMode?'0,255,65':'255,153,0')+','+Math.min(0.10 + (l.x-2)*0.09, 0.40).toFixed(2)+')" title="Em '+l.x+' listas"'
       : '';
     // Non-Amazon deal: marked differently (red edge + store-name badge).
     const shopName = l.shop || (l.wt ? 'Worten' : '');
     const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'" data-date="'+esc(l.date||"")+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
+      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
       const s = l.store || "Outras";
@@ -2315,6 +2364,7 @@ async function refreshDots(){
     NEW[t.id] = (cache[t.id]||[]).some(l => !known.has(l.url) && !isHidden(l));
   }));
   applyDots();
+  if (dosMode) render();   // merged view depends on every tab being loaded
 }
 
 function buildTabs(){
@@ -2359,6 +2409,12 @@ document.getElementById("clearBtn").addEventListener("click", function(){
   render();
 });
 
+document.getElementById("themeBtn").addEventListener("click", () => {
+  dosMode = !dosMode;
+  try { localStorage.setItem("amzTheme", dosMode ? "dos" : ""); } catch(e) {}
+  shown = PAGE; applyTheme(); render();
+});
+applyTheme();
 buildTabs();
 (async () => { await loadHidden(); await loadTab(current); })();
 refreshDots();
