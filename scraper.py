@@ -2070,6 +2070,11 @@ def generate_amazon_html() -> str:
   body.dos li a { background:#000; border-bottom:1px dashed #063d14; font-size:13px; padding:8px 12px; }
   body.dos li a:hover { background:#00ff41 !important; }
   body.dos li a:hover, body.dos li a:hover * { color:#000 !important; border-color:#000 !important; }
+  body.dos header { z-index:20; }
+  /* Thumbs stay untouched by the theme: real colours, no border, and above
+     the scanline overlay so the CRT effect never covers them. */
+  body.dos li .thumb { width:60px; height:60px; background:#fff;
+    position:relative; z-index:10; margin-right:12px; }
   body.dos li .xn { color:var(--text); font-weight:700; margin-right:6px; }
   body.dos li a.wt { box-shadow:inset 3px 0 0 #00ff41; }
   body.dos li .tag.wtag { border-color:var(--border); color:var(--text); }
@@ -2384,9 +2389,14 @@ document.getElementById("list").addEventListener("click", function(e){
   if (!li || !li.dataset.url) return;
   if (current.kind === "tg") {                                       // hide everywhere
     const u = li.dataset.url;
-    const d = li.dataset.date || "";
+    // The same product sits on several tabs with different dates; stamp the
+    // NEWEST of them so no other copy can bring it back (merged list included).
+    let d = li.dataset.date || "";
+    for (const t of TABS) for (const l of (cache[t.id]||[]))
+      if (l.url === u && (l.date||"") > d) d = l.date;
     serverHidden.set(u, d || new Date().toISOString());
     hideOnServer([{url:u, date:d}]); li.remove();
+    document.getElementById("meta").textContent = visibleItems().length + " links";
   } else { markVisited(li.dataset.url); a.classList.add("visited"); }  // static: green
 });
 document.getElementById("sortBtn").addEventListener("click", function(){
