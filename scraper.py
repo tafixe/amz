@@ -77,7 +77,7 @@ AMAZON_BATCH_WINDOW_HOURS = int(os.environ.get("AMAZON_BATCH_WINDOW_HOURS", "24"
 # How far back to treat a reference-source post as "current" and exclude its
 # ASINs from every tab. The source re-promotes deals in the morning and keeps
 # them all day, so 24h (not 12h) covers a full promotion day.
-REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "8"))
+REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "12"))
 
 # Expanding short links (amzlink.to/amzn.to) costs one HTTP request each. We
 # cache resolutions in R2 and only resolve up to N new links per run so the
