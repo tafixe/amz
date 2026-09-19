@@ -2119,7 +2119,13 @@ def generate_amazon_html() -> str:
     font-size:12px; padding:5px 10px; border-radius:8px; cursor:pointer; margin-right:6px; }
   .sort-btn:hover { border-color:var(--brand); color:var(--brand); }
   .sort-btn.active { border-color:var(--brand); color:var(--brand); font-weight:700; }
-  .tabs { display:flex; gap:6px; margin-top:10px; overflow-x:auto; }
+  /* Two rows of tabs so the menu never stretches the window; scrolls
+     sideways inside itself only if even two rows don't fit. */
+  .tabs { display:flex; flex-direction:column; gap:6px; margin-top:10px; overflow-x:auto;
+    max-width:100%; min-width:0; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tabrow { display:flex; gap:6px; }
+  header { max-width:100vw; overflow:hidden; }
   .tab { background:var(--row); border:1px solid var(--border); color:var(--text);
     padding:7px 12px; border-radius:999px; cursor:pointer; font-size:13px; white-space:nowrap; }
   .tab.active { background:var(--brand); border-color:var(--brand); color:#1a1a1a; font-weight:700; }
@@ -2504,7 +2510,15 @@ async function refreshDots(){
 
 function buildTabs(){
   const box = document.getElementById("tabs");
-  box.innerHTML = TABS.map(t => '<button class="tab'+(t.id===current.id?' active':'')+'" data-id="'+t.id+'">'+t.label+'</button>').join("");
+  // Two compact rows, split where the label widths balance (not by count),
+  // so neither row is much longer than the other.
+  const w = t => t.label.length + 4;
+  const total = TABS.reduce((a, t) => a + w(t), 0);
+  let acc = 0, cut = TABS.length;
+  for (let i = 0; i < TABS.length; i++) { acc += w(TABS[i]); if (acc >= total / 2) { cut = i + 1; break; } }
+  const btn = t => '<button class="tab'+(t.id===current.id?' active':'')+'" data-id="'+t.id+'">'+t.label+'</button>';
+  box.innerHTML = '<div class="tabrow">'+TABS.slice(0, cut).map(btn).join("")+'</div>' +
+                  '<div class="tabrow">'+TABS.slice(cut).map(btn).join("")+'</div>';
   box.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
     current = TABS.find(t => t.id === b.dataset.id);
     shown = PAGE; query = ""; document.getElementById("search").value = "";
