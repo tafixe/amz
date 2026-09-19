@@ -2360,12 +2360,16 @@ async function loadTab(tab){
   render(); applyDots();
 }
 
+// DOS view is Amazon-only: other stores (AliExpress, PCComponentes, Worten,
+// coupon offers, ...) stay in the normal tabbed view.
+function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
 function visibleItems(){
   if (dosMode && !query) {   // one merged list: most-shared first, then newest
     const best = new Map();
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
+        if (!isAmazon(l)) continue;
         if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
         const p = best.get(l.url);
         if (!p || (l.x||1) > (p.x||1)) best.set(l.url, l);
@@ -2379,6 +2383,7 @@ function visibleItems(){
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
+        if (dosMode && !isAmazon(l)) continue;           // DOS search: Amazon only too
         if ((t.kind === "tg" ? isHidden(l) : th.has(l.url)) || seenUrl.has(l.url)) continue;
         if (!(l.name||"").toLowerCase().includes(q)) continue;
         seenUrl.add(l.url);
