@@ -41,6 +41,7 @@ jobs:
           DIB_URL: ${{ secrets.DIB_URL }}
           BOM_URL: ${{ secrets.BOM_URL }}
           EXTRA_FEEDS_JSON: ${{ secrets.EXTRA_FEEDS_JSON }}
+          REF_TOKEN: ${{ secrets.REF_TOKEN }}
           G4_FEED: ${{ secrets.G4_FEED }}
           KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
         run: python scraper.py --amazon
