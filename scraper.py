@@ -1414,6 +1414,129 @@ def get_camel_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Generic article-feed tabs. Deal blogs publish posts whose HTML links Amazon
+# products; one provider handles them all, WordPress REST ("wp") or RSS with
+# full content ("rss"). Sources live ONLY in the EXTRA_FEEDS_JSON secret:
+#   {"f1": {"type": "wp"|"rss", "url": "...", "hours": 48}, ...}
+# ---------------------------------------------------------------------------
+try:
+    EXTRA_FEEDS = json.loads(os.environ.get("EXTRA_FEEDS_JSON", "") or "{}")
+except ValueError:
+    EXTRA_FEEDS = {}
+_FEED_CTA = re.compile(r"^(comprar|compra|ver|aqu[ií]|amazon|link|loja|tienda|clica|haz clic|"
+                       r"oferta|chollo|ir a|cons[ií]guelo|lo quiero|m[aá]s info|hoy (en|sin)|"
+                       r"sin stock|pvp|precio)\b", re.I)
+_FEED_PRICE = re.compile(r"^[\d.,]+\s*(€|euros?)|—\s*[\d.,]+\s*€", re.I)
+
+
+def _is_amazon_product_host(u: str) -> bool:
+    h = urlparse(u).netloc.lower()
+    if "media-amazon" in h or "images-amazon" in h or "ssl-images" in h:
+        return False                                    # CDN images, not products
+    return bool(re.search(r"(^|\.)amazon\.[a-z.]{2,7}$", h)) or \
+        any(h == sh or h.endswith("." + sh) for sh in AMAZON_SHORT_HOSTS)
+
+
+def _unwrap_redirect(u: str) -> str:
+    """Affiliate redirectors carry the real target in a query param."""
+    try:
+        for vals in parse_qs(urlparse(u).query).values():
+            for v in vals:
+                if v.startswith("http") and _is_amazon_product_host(v):
+                    return v
+    except ValueError:
+        pass
+    return u
+
+
+def _feed_posts(kind: str, url: str, sess) -> list:
+    """[(content_html, iso_date, title)] newest first."""
+    out = []
+    if kind == "wp":
+        sep = "&" if "?" in url else "?"
+        for page in (1, 2):
+            r = sess.get(f"{url}{sep}page={page}", timeout=40)
+            if r.status_code != 200:
+                break
+            posts = r.json()
+            if not isinstance(posts, list) or not posts:
+                break
+            for p in posts:
+                d = p.get("date_gmt") or ""
+                out.append(((p.get("content") or {}).get("rendered", ""),
+                            d + "+00:00" if d else "",
+                            _clean_name((p.get("title") or {}).get("rendered", ""))))
+    else:
+        x = sess.get(url, timeout=40).text
+        for it in re.findall(r"<item>(.*?)</item>", x, re.S):
+            cm = (re.search(r"<content:encoded>(.*?)</content:encoded>", it, re.S)
+                  or re.search(r"<description>(.*?)</description>", it, re.S))
+            body = re.sub(r"<!\[CDATA\[|\]\]>", "", cm.group(1)) if cm else ""
+            tm = re.search(r"<title>(.*?)</title>", it, re.S)
+            title = _clean_name(re.sub(r"<!\[CDATA\[|\]\]>", "", tm.group(1))) if tm else ""
+            pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+            date = ""
+            if pd:
+                try:
+                    date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
+                except Exception:
+                    date = ""
+            out.append((body, date, title))
+    return out
+
+
+def make_feed_provider(key: str):
+    """items_fn for one configured feed tab: (amazon_url, date, coupon, low, name)."""
+    def _items():
+        cfg = EXTRA_FEEDS.get(key) or {}
+        url = cfg.get("url", "")
+        if not url:
+            return []
+        sess = requests.Session()
+        sess.headers.update(_BROWSER_HEADERS)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=int(cfg.get("hours", 48)))
+        out, seen = [], set()
+        try:
+            posts = _feed_posts(cfg.get("type", "wp"), url, sess)
+        except (requests.RequestException, ValueError) as e:
+            log.error("feed %s: %s", key, e)
+            return []
+        for body, date, title in posts:
+            pdt = _parse_dt(date)
+            if pdt and pdt < cutoff:
+                continue                                 # keep the tab fresh
+            body = re.sub(r"<!--.*?-->", "", html.unescape(body), flags=re.S)
+            store_scan_text(body, date, title)           # transversal store tabs
+            names: dict = {}
+            urls: list = []
+            for m in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', body, re.S):
+                href = _unwrap_redirect(m.group(1))
+                if not _is_amazon_product_host(href):
+                    continue
+                if any(href.split("/")[2].endswith(sh) for sh in AMAZON_SHORT_HOSTS):
+                    href = href.split("?", 1)[0]         # same short link, tracking variants
+                if href not in urls:
+                    urls.append(href)
+                txt = _clean_name(re.sub(r"<[^>]+>", "", m.group(2)))
+                if (len(txt) >= 8 and not _FEED_CTA.match(txt) and not _FEED_PRICE.search(txt)
+                        and len(txt) > len(names.get(href, ""))):
+                    names[href] = txt
+            # a coupon in the body only belongs to the product when it is the only one
+            coupon = extract_coupon_code(body) if len(urls) == 1 else ""
+            for u in urls:
+                if u in seen:
+                    continue
+                seen.add(u)
+                # Multi-product article without a usable anchor: leave the name to
+                # the URL slug / Keepa title instead of repeating the article title.
+                out.append((u, date, coupon, False,
+                            names.get(u) or (title if len(urls) == 1 else "")))
+        log.info("feed %s: %d amazon links", key, len(out))
+        return out
+    return _items
+
+
 def scrape_amazon_links():
     """Scan each configured Telegram list into its own JSON, then refresh the page.
     Telegram tab -> data/amazon_links.json ; Descontos tab -> data/descontos.json."""
@@ -1479,14 +1602,16 @@ def scrape_amazon_links():
         ([], [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_g4_items, "data/g4.json"),
-    ]
+    ] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5")]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
         exclude = None
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
-                                "data/terapia.json", "data/dib.json", "data/g4.json")
+                                "data/terapia.json", "data/dib.json", "data/g4.json",
+                                "data/f1.json", "data/f2.json", "data/f3.json",
+                                "data/f4.json", "data/f5.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
         # Fair share of the Keepa token budget: a tab may spend at most its slice
@@ -2111,6 +2236,11 @@ const TABS = [
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
+  { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
+  { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
+  { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
+  { id:"f4",     label:"ProRev",     src:"/data/f4.json",           kind:"tg" },
+  { id:"f5",     label:"Compra",     src:"/data/f5.json",           kind:"tg" },
   { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
