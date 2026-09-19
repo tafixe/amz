@@ -815,6 +815,72 @@ def keepa_titles(asins: list) -> tuple:
     return titles, queried
 
 
+# We identify ourselves honestly to the reference site (its bot shield lets a
+# named client through, and the owner can allow/deny it by name).
+REF_UA = {"User-Agent": "DescontosBilbicos/1.0 (+https://descontosbilbicos.com)",
+          "Accept-Language": "pt-PT,pt;q=0.9"}
+
+
+def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
+    """Fallback for when the reference site's REST API is closed to us.
+    Its public sitemap carries <lastmod> per post, so we read only the
+    sub-sitemaps that changed, then fetch each NEW post page once ever
+    (cached by URL) to collect its outbound links. Returns the links."""
+    links: list = []
+    try:
+        idx = sess.get(f"{origin}/wp-sitemap.xml", timeout=40, headers=REF_UA).text
+    except requests.RequestException as e:
+        log.error("reference sitemap: %s", e)
+        return links
+    subs = []
+    for blk in re.findall(r"<sitemap>(.*?)</sitemap>", idx, re.S):
+        loc = re.search(r"<loc>(.*?)</loc>", blk, re.S)
+        lm = re.search(r"<lastmod>(.*?)</lastmod>", blk, re.S)
+        if not loc or not lm or "post-sitemap" not in loc.group(1):
+            continue
+        d = _parse_dt(lm.group(1).strip())
+        if d and d >= cutoff:
+            subs.append(loc.group(1).strip())
+    fetched = 0
+    for sub in subs[:6]:                      # only the ones that changed
+        try:
+            x = sess.get(sub, timeout=40, headers=REF_UA).text
+        except requests.RequestException:
+            continue
+        for blk in re.findall(r"<url>(.*?)</url>", x, re.S):
+            loc = re.search(r"<loc>(.*?)</loc>", blk, re.S)
+            lm = re.search(r"<lastmod>(.*?)</lastmod>", blk, re.S)
+            if not loc or not lm:
+                continue
+            d = _parse_dt(lm.group(1).strip())
+            if not d or d < cutoff:
+                continue
+            u = loc.group(1).strip()
+            if u in post_map:                 # page already mined once
+                links += post_map[u]
+                continue
+            if fetched >= 25:                 # cap per run; rest next time
+                continue
+            fetched += 1
+            try:
+                h = sess.get(u, timeout=30, headers=REF_UA).text
+            except requests.RequestException:
+                continue
+            # Only the post's OWN article block: related-post cards and widgets
+            # link other products, and banning those would hide good deals.
+            arts = [m.start() for m in re.finditer(r"<article\b", h)]
+            if len(arts) > 1:
+                h = h[arts[0]:arts[1]]
+            found = extract_amazon_urls(h)
+            found += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", h)
+            found += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", h)
+            post_map[u] = found
+            links += found
+    log.info("reference via sitemap: %d sub-sitemaps, %d pages fetched, %d links",
+             len(subs), fetched, len(links))
+    return links
+
+
 def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     """What the reference source PUBLISHED *or* UPDATED in the last N hours.
     The source re-promotes old posts by updating them (keeping the original
@@ -828,6 +894,7 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     cupo_links: list[str] = []
     wt_short: list[str] = []
     stop = False
+    rest_ok = True
     for page in (1, 2, 3, 4):
         if stop:
             break
@@ -835,12 +902,17 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
             # The reference site only answers REST calls that carry our secret
             # token (its API is closed to everyone else). Sent to that host ONLY.
             _tok = os.environ.get("REF_TOKEN", "").strip()
-            r = sess.get(f"{base}?per_page=100&page={page}&orderby=modified&order=desc", timeout=40,
-                         headers={"X-Scan-Token": _tok} if _tok else None)
+            _hdr = dict(REF_UA)
+            if _tok:
+                _hdr["X-Scan-Token"] = _tok
+            r = sess.get(f"{base}?per_page=100&page={page}&orderby=modified&order=desc",
+                         timeout=40, headers=_hdr)
             if r.status_code != 200:
+                rest_ok = False
                 break
             posts = r.json()
         except (requests.RequestException, ValueError):
+            rest_ok = False
             break
         if not posts:
             break
@@ -871,6 +943,14 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     rc = r2_get_amazon_links(REF_CACHE_KEY)
     amap: dict = rc.get("a", {})   # source link -> ASIN ("" = not a product)
     wmap: dict = rc.get("w", {})   # awin short link -> worten url ("" = not worten)
+    pmap: dict = rc.get("p", {})   # post url -> outbound links (sitemap path)
+    # REST closed (or failing)? Fall back to the public sitemap — no API needed.
+    if not rest_ok and not cupo_links:
+        _u = urlparse(base)
+        origin = f"{_u.scheme}://{_u.netloc}"
+        extra = _reference_via_sitemap(sess, cutoff, origin, pmap)
+        cupo_links += [u for u in extra if AMAZON_HOST_RE.match(u)]
+        wt_short += [u for u in extra if "tidd.ly" in u or "worten.pt" in u]
     opened = 0
     recent = set()
     for u in dict.fromkeys(cupo_links):
@@ -912,7 +992,9 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
         amap = dict(list(amap.items())[-20000:])
     if len(wmap) > 20000:
         wmap = dict(list(wmap.items())[-20000:])
-    r2_put_amazon_links({"a": amap, "w": wmap}, REF_CACHE_KEY)
+    if len(pmap) > 20000:
+        pmap = dict(list(pmap.items())[-20000:])
+    r2_put_amazon_links({"a": amap, "w": wmap, "p": pmap}, REF_CACHE_KEY)
     log.info("reference source last %dh (published or updated): %d asins, %d worten "
              "(%d links opened this run)", hours, len(recent), len(wturls), opened)
     return recent, wturls
