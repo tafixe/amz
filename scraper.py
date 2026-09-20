@@ -899,12 +899,12 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
         if stop:
             break
         try:
-            # The reference site only answers REST calls that carry our secret
-            # token (its API is closed to everyone else). Sent to that host ONLY.
+            # The reference site only answers REST calls that carry the owner's key
+            # in X-Tafixe-Key (its API is closed to everyone else). Sent to that host ONLY.
             _tok = os.environ.get("REF_TOKEN", "").strip()
             _hdr = dict(REF_UA)
             if _tok:
-                _hdr["X-Scan-Token"] = _tok
+                _hdr["X-Tafixe-Key"] = _tok
             r = sess.get(f"{base}?per_page=100&page={page}&orderby=modified&order=desc",
                          timeout=40, headers=_hdr)
             if r.status_code != 200:
