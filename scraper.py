@@ -842,6 +842,7 @@ def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
         if d and d >= cutoff:
             subs.append(loc.group(1).strip())
     fetched = 0
+    used: set = set()
     for sub in subs[:6]:                      # only the ones that changed
         try:
             x = sess.get(sub, timeout=40, headers=REF_UA).text
@@ -856,8 +857,13 @@ def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
             if not d or d < cutoff:
                 continue
             u = loc.group(1).strip()
-            if u in post_map:                 # page already mined once
-                links += post_map[u]
+            # Cache per URL *and* lastmod: the reference site re-promotes deals by
+            # rewriting an OLD post (same URL, new product). Caching by URL alone
+            # kept returning the old links, so the new ASIN was never banned.
+            ck = u + "|" + lm.group(1).strip()
+            used.add(ck)
+            if ck in post_map:                # this version already mined
+                links += post_map[ck]
                 continue
             if fetched >= 25:                 # cap per run; rest next time
                 continue
@@ -874,8 +880,11 @@ def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
             found = extract_amazon_urls(h)
             found += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", h)
             found += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", h)
-            post_map[u] = found
+            post_map[ck] = found
             links += found
+    if subs:                                  # keep only what is still in the window
+        for k in [k for k in post_map if k not in used]:
+            del post_map[k]
     log.info("reference via sitemap: %d sub-sitemaps, %d pages fetched, %d links",
              len(subs), fetched, len(links))
     return links
