@@ -863,7 +863,7 @@ def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
             ck = u + "|" + lm.group(1).strip()
             used.add(ck)
             if ck in post_map:                # this version already mined
-                links += post_map[ck]
+                links += [(x, d.isoformat()) for x in post_map[ck]]
                 continue
             if fetched >= 25:                 # cap per run; rest next time
                 continue
@@ -881,7 +881,7 @@ def _reference_via_sitemap(sess, cutoff, origin: str, post_map: dict) -> list:
             found += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", h)
             found += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", h)
             post_map[ck] = found
-            links += found
+            links += [(x, d.isoformat()) for x in found]
     if subs:                                  # keep only what is still in the window
         for k in [k for k in post_map if k not in used]:
             del post_map[k]
@@ -902,8 +902,13 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     cupo_links: list[str] = []
     wt_short: list[str] = []
+    ltime: dict = {}               # link -> the reference post's own time (published/updated)
     stop = False
     rest_ok = True
+
+    def _t(link, iso):
+        if iso > ltime.get(link, ""):
+            ltime[link] = iso
     for page in (1, 2, 3, 4):
         if stop:
             break
@@ -940,11 +945,16 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
                 stop = True
                 break
             content = (p.get("content", {}) or {}).get("rendered", "")
-            cupo_links += extract_amazon_urls(content)
+            ts = max(stamps).isoformat()
+            found = extract_amazon_urls(content)
             # Worten deals on the reference source hide behind an Awin short
             # link (tidd.ly) or a direct worten.pt link — collect both.
-            wt_short += re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", content)
-            wt_short += re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", content)
+            wfound = (re.findall(r"https?://tidd\.ly/[A-Za-z0-9]+", content)
+                      + re.findall(r"https?://(?:www\.)?worten\.pt/[^\s\"'<>\\]+", content))
+            cupo_links += found
+            wt_short += wfound
+            for x in found + wfound:
+                _t(x, ts)
     # Persistent resolution cache: each short link is OPENED AT MOST ONCE, ever.
     # Following a shortener registers a (bot) affiliate click on Amazon/Awin —
     # without this cache the same ~40 links would be re-clicked every 10 min.
@@ -958,14 +968,23 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
         _u = urlparse(base)
         origin = f"{_u.scheme}://{_u.netloc}"
         extra = _reference_via_sitemap(sess, cutoff, origin, pmap)
-        cupo_links += [u for u in extra if AMAZON_HOST_RE.match(u)]
-        wt_short += [u for u in extra if "tidd.ly" in u or "worten.pt" in u]
+        cupo_links += [u for u, _ in extra if AMAZON_HOST_RE.match(u)]
+        wt_short += [u for u, _ in extra if "tidd.ly" in u or "worten.pt" in u]
+        for u, iso in extra:
+            _t(u, iso)
     opened = 0
-    recent = set()
+    recent: dict = {}              # asin -> latest reference-post time
+    wturls: dict = {}              # clean worten url -> latest reference-post time
+
+    def _keep(dst, key, link):
+        t = ltime.get(link, "")
+        if t >= dst.get(key, ""):
+            dst[key] = t
+
     for u in dict.fromkeys(cupo_links):
         if u in amap:
             if amap[u]:
-                recent.add(amap[u])
+                _keep(recent, amap[u], u)
             continue
         short = any(h in u for h in AMAZON_SHORT_HOSTS)
         if short:
@@ -973,19 +992,18 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
         rr = resolve_amazon_link(u)
         if rr:
             amap[u] = rr["asin"]
-            recent.add(rr["asin"])
+            _keep(recent, rr["asin"], u)
         elif not short:
             amap[u] = ""              # direct non-product link: permanent miss
         # failed short links stay uncached -> retried while inside the window
-    wturls = set()
     for u in dict.fromkeys(wt_short):
         if "tidd.ly" not in u:        # direct worten link, nothing to open
             if re.search(r"worten\.pt/", u):
-                wturls.add(re.sub(r"[?#].*$", "", html.unescape(u)).rstrip(").,;/"))
+                _keep(wturls, re.sub(r"[?#].*$", "", html.unescape(u)).rstrip(").,;/"), u)
             continue
         if u in wmap:
             if wmap[u]:
-                wturls.add(wmap[u])
+                _keep(wturls, wmap[u], u)
             continue
         try:
             final = sess.get(u, timeout=20, allow_redirects=True).url
@@ -996,7 +1014,7 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
               if re.search(r"worten\.pt/", final) else "")
         wmap[u] = wu
         if wu:
-            wturls.add(wu)
+            _keep(wturls, wu, u)
     if len(amap) > 20000:
         amap = dict(list(amap.items())[-20000:])
     if len(wmap) > 20000:
@@ -1656,9 +1674,22 @@ def scrape_amazon_links():
     cupo_recent, cupo_worten = reference_recent_asins(_sess, hours=REFERENCE_WINDOW_HOURS)
     now_iso = datetime.now(timezone.utc).isoformat()
     BANNED_KEY = "data/cupo_banned.json"
-    banned = r2_get_amazon_links(BANNED_KEY).get("b", {})   # {asin_or_worten_url: ban_iso}
-    for a in cupo_recent | cupo_worten:                      # Worten deals banned by clean URL
-        banned[a] = now_iso                                  # (re)stamp the ban as of now
+    # {asin_or_worten_url: time the reference site last published/updated it}
+    banned = r2_get_amazon_links(BANNED_KEY).get("b", {})
+    for k, t in list(cupo_recent.items()) + list(cupo_worten.items()):
+        prev = _parse_dt(banned.get(k, ""))
+        new = _parse_dt(t) or datetime.now(timezone.utc)
+        if prev is None or new > prev:
+            banned[k] = new.isoformat()
+    # "On the reference site right now" is derived from the STORED map, not from
+    # this run's read: a failed or empty read (site hiccup, shield, timeout)
+    # must never be taken as "nothing is on the site" and release live deals.
+    _win = timedelta(hours=REFERENCE_WINDOW_HOURS)
+    _now = datetime.now(timezone.utc)
+    cupo_now = {k for k, t in banned.items() if (_parse_dt(t) or _now - 2 * _win) >= _now - _win}
+    if not cupo_recent and not cupo_worten:
+        log.warning("reference read returned nothing this run; protecting %d products from the stored map",
+                    len(cupo_now))
 
     # Shared ASIN -> product name map. Sources that expose titles (DEZ/NAS/TITAS/
     # Chollo, and any slug) fill it; bare /dp/ASIN links on other tabs reuse it,
@@ -1720,7 +1751,7 @@ def scrape_amazon_links():
             slice_cap = fair[0]
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
-                                fair, banned, top_rank, cupo_recent | cupo_worten)
+                                fair, banned, top_rank, cupo_now)
         if price_budget and fair is not None:
             price_budget[0] -= slice_cap - fair[0]   # only what this tab spent
         results[state_key] = last
@@ -1782,6 +1813,13 @@ def _parse_dt(s):
         return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _ban_until(stamp: str) -> str:
+    """End of a product's time on the reference site: its post time + window.
+    A source must publish AFTER this to bring the deal back."""
+    d = _parse_dt(stamp)
+    return (d + timedelta(hours=REFERENCE_WINDOW_HOURS)).isoformat() if d else stamp
 
 
 def _dt_after(a, b) -> bool:
@@ -2007,9 +2045,9 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             continue
         if banned is not None and resolved["asin"] in banned:
             src_date = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"], "")
-            if not _dt_after(src_date, banned[resolved["asin"]]):
-                continue                               # still inside the ban
-            banned.pop(resolved["asin"], None)         # re-published later -> back
+            if not _dt_after(src_date, _ban_until(banned[resolved["asin"]])):
+                continue                               # published while it was on the site
+            banned.pop(resolved["asin"], None)         # re-published after the window -> back
 
         lid = resolved["id"]
         if lid in seen_ids:
@@ -2068,7 +2106,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if cupo_now and r["url"] in cupo_now:
             continue
         if banned is not None and r["url"] in banned:
-            if not _dt_after(r["date"], banned[r["url"]]):
+            if not _dt_after(r["date"], _ban_until(banned[r["url"]])):
                 continue
             banned.pop(r["url"], None)
         if not r.get("coupon"):
@@ -2083,7 +2121,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if _hidden(cleared, r["url"], r.get("date") or now_iso) or any(l["url"] == r["url"] for l in links):
             continue
         if banned is not None and r["url"] in banned:
-            if not _dt_after(r.get("date", ""), banned[r["url"]]):
+            if not _dt_after(r.get("date", ""), _ban_until(banned[r["url"]])):
                 continue
             banned.pop(r["url"], None)
         if not r.get("coupon"):
