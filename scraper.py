@@ -1599,6 +1599,58 @@ def _feed_posts(kind: str, url: str, sess) -> list:
     return out
 
 
+def _feed_page_posts(key: str, cfg: dict, sess) -> list:
+    """Type "rsspage": the feed only lists articles; the products live in each
+    article page. Each page is fetched ONCE (cached in R2 as the Amazon anchors
+    of its body region), capped per run. The body region is cut between the
+    optional "start"/"end" markers from the config, so sidebar/ad widgets that
+    link unrelated products are ignored."""
+    try:
+        x = sess.get(cfg.get("url", ""), timeout=40).text
+    except requests.RequestException as e:
+        log.error("feed %s: %s", key, e)
+        return []
+    ckey = f"data/{key}_pages.json"
+    cache: dict = r2_get_amazon_links(ckey).get("p", {})
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=int(cfg.get("hours", 48)))
+    out, keep, fetched = [], {}, 0
+    for it in re.findall(r"<item>(.*?)</item>", x, re.S):
+        lm = re.search(r"<link>(.*?)</link>", it, re.S)
+        tm = re.search(r"<title>(.*?)</title>", it, re.S)
+        pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+        link = re.sub(r"<!\[CDATA\[|\]\]>", "", lm.group(1)).strip() if lm else ""
+        title = _clean_name(re.sub(r"<!\[CDATA\[|\]\]>", "", tm.group(1))) if tm else ""
+        date = ""
+        if pd:
+            try:
+                date = email.utils.parsedate_to_datetime(pd.group(1).strip()).astimezone(timezone.utc).isoformat()
+            except Exception:
+                date = ""
+        dt = _parse_dt(date)
+        if not link or (dt and dt < cutoff):
+            continue
+        if link not in cache:
+            if fetched >= int(cfg.get("max_pages", 15)):
+                continue                           # picked up next run
+            fetched += 1
+            try:
+                h = sess.get(link, timeout=30).text
+            except requests.RequestException:
+                continue
+            a = h.find(cfg["start"]) if cfg.get("start") else 0
+            a = max(a, 0)
+            b = h.find(cfg["end"], a) if cfg.get("end") else -1
+            region = h[a:b] if b > a else h[a:]
+            cache[link] = "".join(
+                m.group(0) for m in re.finditer(r'<a\b[^>]*href="(https?://[^"]+)"[^>]*>.*?</a>', region, re.S)
+                if _is_amazon_product_host(_unwrap_redirect(html.unescape(m.group(1)))))
+        keep[link] = cache[link]
+        out.append((cache[link], date, title))
+    r2_put_amazon_links({"p": keep}, ckey)
+    log.info("feed %s: %d articles in window, %d pages fetched", key, len(out), fetched)
+    return out
+
+
 def make_feed_provider(key: str):
     """items_fn for one configured feed tab: (amazon_url, date, coupon, low, name)."""
     def _items():
@@ -1611,7 +1663,8 @@ def make_feed_provider(key: str):
         cutoff = datetime.now(timezone.utc) - timedelta(hours=int(cfg.get("hours", 48)))
         out, seen = [], set()
         try:
-            posts = _feed_posts(cfg.get("type", "wp"), url, sess)
+            posts = (_feed_page_posts(key, cfg, sess) if cfg.get("type") == "rsspage"
+                     else _feed_posts(cfg.get("type", "wp"), url, sess))
         except (requests.RequestException, ValueError) as e:
             log.error("feed %s: %s", key, e)
             return []
@@ -1728,7 +1781,7 @@ def scrape_amazon_links():
         ([], [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_g4_items, "data/g4.json"),
-    ] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5")]
+    ] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5", "f6")]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
         exclude = None
@@ -1737,7 +1790,7 @@ def scrape_amazon_links():
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", "data/g4.json",
                                 "data/f1.json", "data/f2.json", "data/f3.json",
-                                "data/f4.json", "data/f5.json")
+                                "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
         top_rank = 1000 if state_key == "data/titas.json" else None
         # Fair share of the Keepa token budget: a tab may spend at most its slice
@@ -2380,6 +2433,7 @@ const TABS = [
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
   { id:"f4",     label:"ProRev",     src:"/data/f4.json",           kind:"tg" },
   { id:"f5",     label:"Compra",     src:"/data/f5.json",           kind:"tg" },
+  { id:"f6",     label:"El",         src:"/data/f6.json",           kind:"tg" },
   { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
