@@ -2155,13 +2155,17 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         if not r["date"]:                       # web source: first-seen date
             r["date"] = seen.get(r["url"]) or now_iso
             seen[r["url"]] = r["date"]
-        # Same windowed reference-source ban as ASINs, keyed by the clean URL.
-        if cupo_now and r["url"] in cupo_now:
-            continue
-        if banned is not None and r["url"] in banned:
-            if not _dt_after(r["date"], _ban_until(banned[r["url"]])):
+        # Worten deals are shown even when they are already on the reference
+        # site (owner's choice) and marked with a red dot in the UI. Other
+        # stores keep the windowed reference-source ban.
+        is_wt = r.get("wt") or r.get("shop") == "Worten"
+        if not is_wt:
+            if cupo_now and r["url"] in cupo_now:
                 continue
-            banned.pop(r["url"], None)
+            if banned is not None and r["url"] in banned:
+                if not _dt_after(r["date"], _ban_until(banned[r["url"]])):
+                    continue
+                banned.pop(r["url"], None)
         if not r.get("coupon"):
             r.pop("coupon", None)
         links.append(r)
@@ -2173,7 +2177,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     for r in extra:
         if _hidden(cleared, r["url"], r.get("date") or now_iso) or any(l["url"] == r["url"] for l in links):
             continue
-        if banned is not None and r["url"] in banned:
+        if banned is not None and r["url"] in banned and r.get("shop") != "Worten":
             if not _dt_after(r.get("date", ""), _ban_until(banned[r["url"]])):
                 continue
             banned.pop(r["url"], None)
@@ -2358,6 +2362,9 @@ def generate_amazon_html() -> str:
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#f5b50a; margin-right:7px; vertical-align:middle; flex-shrink:0;
     box-shadow:0 0 6px rgba(245,181,10,.7); }
+  .wt-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+    background:#e11d2e; margin-right:7px; vertical-align:middle; flex-shrink:0;
+    box-shadow:0 0 6px rgba(225,29,46,.7); }
   li a.visited { background:rgba(37,211,102,0.10); }
   li a.visited .name { color:var(--green); }
   li a.visited .arrow { color:var(--green); }
@@ -2624,7 +2631,8 @@ function render(){
   let lastStore = null;
   box.innerHTML = slice.map(l => {
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
-    const dot = l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '';
+    const dot = (l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '') +
+      ((l.wt || l.shop === "Worten") ? '<span class="wt-dot" title="Worten"></span>' : '');
     // For all-time-low rows show the historical min price; otherwise the usual tag.
     const tag = (l.low && l.minp)
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
