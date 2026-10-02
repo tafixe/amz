@@ -452,7 +452,56 @@ def extract_coupon_code(text: str) -> str:
 # link for these stores; everything lands together in one tab per store.
 # ---------------------------------------------------------------------------
 STORE_TAB_KEYS = {"aliexpress": "data/aliexpress.json", "pcc": "data/pccomponentes.json"}
-_STORE_ITEMS: dict = {"aliexpress": [], "pcc": []}   # reset at the start of each run
+_STORE_ITEMS: dict = {"aliexpress": [], "pcc": [], "worten": []}   # reset each run
+
+# Worten detection through ANY link form: direct product pages, affiliate
+# deep links that carry the target in a query param (Awin "ued"), and short
+# links (tidd.ly = Awin, t.ly, bit.ly, ...) resolved ONCE and cached in R2.
+SHORT_CACHE_KEY = "data/short_cache.json"
+_SHORT_CACHE: dict = {}          # short url -> clean worten product url ("" = not worten)
+_SHORT_OPENED = [0]
+_WT_MAX_OPEN = 60                # new short links opened per run (rest next run)
+_WT_SHORT_HOSTS = ("tidd.ly", "t.ly", "bit.ly", "tinyurl.com", "cutt.ly", "rb.gy", "is.gd",
+                   "s.id", "shorturl.at", "tny.im", "rebrand.ly", "bl.ink", "awin1.com")
+
+
+def _clean_worten(u: str) -> str:
+    return re.sub(r"[?#].*$", "", html.unescape(u)).rstrip(").,;/")
+
+
+def resolve_to_worten(u: str, mentions_worten: bool = False) -> str:
+    """Clean worten.pt product URL behind any link form, or "" if not Worten."""
+    u = html.unescape(u)
+    if "worten.pt/produtos/" in u:
+        return _clean_worten(u)
+    try:
+        for vals in parse_qs(urlparse(u).query).values():
+            for v in vals:
+                v = unquote(v)
+                if "worten.pt/produtos/" in v:
+                    return _clean_worten(v)
+    except ValueError:
+        pass
+    host = re.sub(r"^www\.", "", urlparse(u).netloc.lower())
+    if not any(host == h or host.endswith("." + h) for h in _WT_SHORT_HOSTS):
+        return ""
+    key = u.split("#", 1)[0]
+    if key in _SHORT_CACHE:
+        return _SHORT_CACHE[key]
+    # Only open a short link when it can plausibly be Worten: Awin's tidd.ly /
+    # awin1 links, or any shortener in a post that mentions Worten.
+    if not (mentions_worten or host in ("tidd.ly", "awin1.com")):
+        return ""
+    if _SHORT_OPENED[0] >= _WT_MAX_OPEN:
+        return ""
+    _SHORT_OPENED[0] += 1
+    try:
+        final = requests.get(key, headers=_BROWSER_HEADERS, timeout=20, allow_redirects=True).url
+    except requests.RequestException:
+        return ""                    # retried next run
+    w = _clean_worten(final) if "worten.pt/produtos/" in final else ""
+    _SHORT_CACHE[key] = w
+    return w
 # Non-Amazon rows a provider queues for its OWN tab (state_key -> [row dicts]);
 # drained by scan_amazon_list and shown with a store badge. Reset per run.
 _EXTRA_ROWS: dict = {}
@@ -496,6 +545,13 @@ def store_scan_text(text: str, date: str = "", name: str = ""):
             u = html.unescape(u).rstrip(").,;")
             if _store_link_ok(store, u):
                 store_add(store, u, date, cpn, name or _store_slug_name(u))
+    # Worten through any link form (direct, affiliate deep link, short link).
+    plain = html.unescape(text)
+    mentions = "worten" in plain.lower()
+    for u in dict.fromkeys(re.findall(r"https?://[^\s\"'<>\\]+", plain)):
+        w = resolve_to_worten(u.rstrip(").,;"), mentions)
+        if w:
+            store_add("worten", w, date, cpn, name or _store_slug_name(w))
 
 
 def _post_text_name(html_text: str) -> str:
@@ -1079,6 +1135,12 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
                    "shop": shop}
             if (p.get("coupon") or "").strip():
                 row["coupon"] = p["coupon"].strip()
+            if shop == "Worten":
+                w = resolve_to_worten(link, True)
+                if w:
+                    row["url"] = w
+                    row["wt"] = 1
+                    store_add("worten", w, row["date"], row.get("coupon", ""), row["name"])
             _EXTRA_ROWS.setdefault("data/dez.json", []).append(row)
             # Tracked stores also feed their own transversal tabs.
             if st_raw == "aliexpress":
@@ -1716,6 +1778,9 @@ def scrape_amazon_links():
     for v in _STORE_ITEMS.values():    # fresh transversal store collector this run
         v.clear()
     _EXTRA_ROWS.clear()                # fresh per-tab non-Amazon rows this run
+    _SHORT_CACHE.clear()
+    _SHORT_CACHE.update(r2_get_amazon_links(SHORT_CACHE_KEY).get("c", {}))
+    _SHORT_OPENED[0] = 0
 
     # Cross-check EVERY list against the reference source on every run. Any
     # product seen there (ASIN or Worten URL) is banned while inside its 12h
@@ -1826,9 +1891,29 @@ def scrape_amazon_links():
                 row["wt"] = 1
                 row.pop("x", None)
                 wt_all[l["url"]] = row
+    for it in _STORE_ITEMS.get("worten") or []:
+        u = it.get("url", "")
+        if not u or _hidden(cleared, u, it.get("date") or now_iso):
+            continue
+        row = {"name": it.get("name") or "Produto Worten", "url": u,
+               "date": it.get("date") or now_iso, "wt": 1}
+        if it.get("coupon"):
+            row["coupon"] = it["coupon"]
+        prev = wt_all.get(u)
+        if prev is None or (row["date"] or "") > (prev.get("date") or ""):
+            if prev and prev.get("name") and not row["name"].startswith("Produto "):
+                pass
+            elif prev and prev.get("name"):
+                row["name"] = prev["name"]
+            wt_all[u] = row
+    if len(_SHORT_CACHE) > 20000:
+        for k in list(_SHORT_CACHE)[:len(_SHORT_CACHE) - 20000]:
+            del _SHORT_CACHE[k]
+    r2_put_amazon_links({"c": _SHORT_CACHE}, SHORT_CACHE_KEY)
     wt_links = sorted(wt_all.values(), key=lambda l: l.get("date") or "", reverse=True)[:300]
     r2_put_amazon_links({"updated": now_iso, "links": wt_links}, "data/worten.json")
-    log.info("[data/worten.json] worten tab: %d links", len(wt_links))
+    log.info("[data/worten.json] worten tab: %d links (%d short links opened this run)",
+             len(wt_links), _SHORT_OPENED[0])
 
     # Stamp cross-tab multiplicity: x = number of lists carrying the ASIN this
     # run. Only rows with x >= 2 carry the field; the UI tints them (stronger
