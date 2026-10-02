@@ -1809,6 +1809,27 @@ def scrape_amazon_links():
             price_budget[0] -= slice_cap - fair[0]   # only what this tab spent
         results[state_key] = last
 
+    # Worten tab: every Worten product row from every tab, in one list
+    # (deduped by product URL, newest first). Rows already passed the
+    # hide-on-open filter in their own tabs. Only real worten.pt product
+    # pages — coupon landing pages and shorteners are left out.
+    wt_all: dict = {}
+    for sk, state in results.items():
+        for l in state.get("links", []):
+            if not (l.get("wt") or l.get("shop") == "Worten"):
+                continue
+            if "worten.pt/" not in l.get("url", ""):
+                continue
+            prev = wt_all.get(l["url"])
+            if prev is None or (l.get("date") or "") > (prev.get("date") or ""):
+                row = dict(l)
+                row["wt"] = 1
+                row.pop("x", None)
+                wt_all[l["url"]] = row
+    wt_links = sorted(wt_all.values(), key=lambda l: l.get("date") or "", reverse=True)[:300]
+    r2_put_amazon_links({"updated": now_iso, "links": wt_links}, "data/worten.json")
+    log.info("[data/worten.json] worten tab: %d links", len(wt_links))
+
     # Stamp cross-tab multiplicity: x = number of lists carrying the ASIN this
     # run. Only rows with x >= 2 carry the field; the UI tints them (stronger
     # with more lists). Tabs whose links changed are re-written.
@@ -2446,6 +2467,7 @@ const TABS = [
   { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
+  { id:"worten", label:"Worten",     src:"/data/worten.json",       kind:"tg" },
 ];
 const PAGE = 200;
 let current = TABS[0];
