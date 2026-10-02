@@ -1926,8 +1926,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     show_all = state_key in ("data/nas.json", "data/descontos.json")
     scache = existing.get("scache", {})   # shortener url -> final url ("" = unresolvable)
     _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp|facebook|instagram", re.I)
+    # tidd.ly is Awin's shortener: resolving it once reveals the real store
+    # (e.g. Worten), so the row gets the right badge/red dot and a clean link.
     _GENERIC_SHORT = ("t.ly", "bit.ly", "tinyurl.com", "cutt.ly", "rb.gy", "is.gd",
-                      "s.id", "shorturl.at", "tny.im", "rebrand.ly")
+                      "s.id", "shorturl.at", "tny.im", "rebrand.ly", "tidd.ly")
     _SHOP_WORDS = ("aliexpress", "worten", "prozis", "pccomponentes", "fnac",
                    "mediamarkt", "decathlon", "lidl", "continente", "ikea", "shein",
                    "temu", "notino", "pcdiga", "radiopopular", "auchan", "wells")
