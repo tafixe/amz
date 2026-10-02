@@ -2351,13 +2351,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     cur_urls = {l["url"] for l in links}
     seen = {u: d for u, d in seen.items() if u in cur_urls}
 
-    if sort_by_date:
-        # Newest first (ISO dates sort chronologically; missing dates go last).
-        links.sort(key=lambda l: l.get("date", ""), reverse=True)
-    else:
-        # Reorder so the list doesn't mirror the channel's order. Deterministic
-        # (hash of the URL) so it stays stable across the 10-min refreshes.
-        links.sort(key=lambda l: hashlib.md5(l["url"].encode("utf-8")).hexdigest())
+    # Every tab: newest first by the real publication time (parsed, so mixed
+    # timestamp formats like "Z" / "+00:00" / ".000Z" still order correctly).
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    links.sort(key=lambda l: _parse_dt(l.get("date")) or _epoch, reverse=True)
 
     if len(scache) > 3000:
         scache = dict(list(scache.items())[-3000:])
@@ -2519,7 +2516,6 @@ def generate_amazon_html() -> str:
   <div class="top">
     <h1>\U0001F6D2 Links Amazon</h1>
     <span class="meta" id="meta"></span>
-    <button class="sort-btn" id="sortBtn" title="Ordenar por data" style="display:none">Por data</button>
     <button class="clear-btn" id="clearBtn" title="Limpar esta lista">Limpar tudo</button>
     <button class="theme-btn" id="themeBtn" title="Mudar tipo de lista">&gt;_</button>
   </div>
@@ -2666,6 +2662,9 @@ async function loadTab(tab){
 // DOS view is Amazon-only: other stores (AliExpress, PCComponentes, Worten,
 // coupon offers, ...) stay in the normal tabbed view.
 function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
+// Real-time ordering: parse dates (mixed formats) — newest first everywhere.
+function dateMs(l){ const t = Date.parse(l.date || ""); return isNaN(t) ? 0 : t; }
+const byNewest = (a, b) => dateMs(b) - dateMs(a);
 function visibleItems(){
   if (dosMode && !query) {   // one merged list: most-shared first, then newest
     const best = new Map();
@@ -2678,8 +2677,7 @@ function visibleItems(){
         if (!p || (l.x||1) > (p.x||1)) best.set(l.url, l);
       }
     }
-    return [...best.values()].sort((a, b) =>
-      ((b.x||1) - (a.x||1)) || (b.date||"").localeCompare(a.date||""));
+    return [...best.values()].sort((a, b) => ((b.x||1) - (a.x||1)) || byNewest(a, b));
   }
   if (query) {   // transversal search: matches from EVERY tab, tagged with origin
     const q = query.toLowerCase(), seenUrl = new Set(), out = [];
@@ -2693,22 +2691,14 @@ function visibleItems(){
         out.push(Object.assign({}, l, { srcTab: t.label }));
       }
     }
-    return out;
+    return out.sort(byNewest);
   }
   const h = hiddenSet(current.id);
   let items = (cache[current.id]||[]).filter(l => current.kind === "tg" ? !isHidden(l) : !h.has(l.url));
-  if (current.id === "tg" && sortByDate) {  // newest first, by post date
-    items = items.slice().sort((a, b) => (b.date||"").localeCompare(a.date||""));
-  }
-  return items;
+  return items.slice().sort(byNewest);
 }
 
-function updateSortBtn(){
-  const b = document.getElementById("sortBtn");
-  b.style.display = current.id === "tg" ? "" : "none";
-  b.classList.toggle("active", sortByDate);
-  b.textContent = sortByDate ? "Data ↓" : "Por data";
-}
+function updateSortBtn(){}   // everything is newest-first now; no toggle
 
 function render(){
   updateSortBtn();
@@ -2733,7 +2723,7 @@ function render(){
       const sa = a.store || "Outras", sb = b.store || "Outras";
       if (sa !== sb) return (newest[sb]||"").localeCompare(newest[sa]||"") || sa.localeCompare(sb);
       const d = (b.coupon?1:0) - (a.coupon?1:0);
-      return d || (b.date||"").localeCompare(a.date||"");
+      return d || byNewest(a, b);
     });
   }
   const slice = ordered.slice(0, shown);
@@ -2851,11 +2841,6 @@ document.getElementById("list").addEventListener("click", function(e){
     hideOnServer([{url:u, date:d}]); li.remove();
     document.getElementById("meta").textContent = visibleItems().length + " links";
   } else { markVisited(li.dataset.url); a.classList.add("visited"); }  // static: green
-});
-document.getElementById("sortBtn").addEventListener("click", function(){
-  sortByDate = !sortByDate;
-  localStorage.setItem("amzSortTg", sortByDate ? "1" : "0");
-  shown = PAGE; render();
 });
 document.getElementById("moreBtn").addEventListener("click", () => { shown += PAGE; render(); });
 document.getElementById("search").addEventListener("input", function(){ query = this.value.trim(); shown = PAGE; render(); });
