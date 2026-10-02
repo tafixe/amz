@@ -77,7 +77,7 @@ AMAZON_BATCH_WINDOW_HOURS = int(os.environ.get("AMAZON_BATCH_WINDOW_HOURS", "24"
 # How far back to treat a reference-source post as "current" and exclude its
 # ASINs from every tab. The source re-promotes deals in the morning and keeps
 # them all day, so 24h (not 12h) covers a full promotion day.
-REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "12"))
+REFERENCE_WINDOW_HOURS = int(os.environ.get("REFERENCE_WINDOW_HOURS", "48"))
 
 # Expanding short links (amzlink.to/amzn.to) costs one HTTP request each. We
 # cache resolutions in R2 and only resolve up to N new links per run so the
@@ -909,7 +909,7 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     def _t(link, iso):
         if iso > ltime.get(link, ""):
             ltime[link] = iso
-    for page in (1, 2, 3, 4):
+    for page in range(1, 11):     # up to 1000 posts: covers a 48h window with margin
         if stop:
             break
         try:
