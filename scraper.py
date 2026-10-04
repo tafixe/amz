@@ -2742,10 +2742,10 @@ function render(){
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
     const dot = (l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '') +
       ((l.wt || l.shop === "Worten") ? '<span class="wt-dot" title="Worten"></span>' : '');
-    // For all-time-low rows show the historical min price; otherwise the usual tag.
-    const tag = (l.low && l.minp)
-      ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>'
-      : (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'" title="Data de publicação">'+
+    // All-time-low rows show the historical min price AND the publish time.
+    const tag = ((l.low && l.minp)
+      ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>' : '') +
+      (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'" title="Data de publicação">'+
           (l.store?'pub. ':'')+esc(l.extra)+'</span>' : '');
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
     const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
