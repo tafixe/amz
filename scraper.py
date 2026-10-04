@@ -770,7 +770,8 @@ KEEPA_PRICE_SERIES = (0, 8, 18, 33)
 KEEPA_TYPE_NAMES = {0: "Amazon", 8: "Oferta-relâmpago", 18: "Buy Box", 33: "Prime exclusive"}
 
 
-def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN) -> int:
+def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN,
+                      new_cap: int = 0) -> int:
     """Refresh the all-time-low flag for ASINs (transversal to every tab) and
     mutate low_cache: {asin: {"low": bool, "checked": iso}}. A 24h TTL plus a
     per-run cap keep token use ~1/product. Returns how many were (re)priced."""
@@ -778,11 +779,14 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
         return 0
     now = datetime.now(timezone.utc)
     ttl = timedelta(hours=KEEPA_TTL_HOURS)
-    stale = []
+    stale, new = [], []
     for a in asins:
-        if not a or a in stale:
+        if not a or a in stale or a in new:
             continue
         c = low_cache.get(a)
+        if not c or "checked" not in c:
+            new.append(a)       # never priced: no photo / dot yet
+            continue
         fresh = False
         if c and "checked" in c:
             try:
@@ -791,7 +795,11 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
                 fresh = False
         if not fresh:
             stale.append(a)
-    stale = stale[:max_count]   # cap tokens per run (shared budget)
+    # Never-priced ASINs go first and may use the whole remaining run pot
+    # (new_cap), so a fresh burst gets its photo on first appearance; plain
+    # TTL re-checks stay within this tab's fair slice (max_count).
+    new = new[:max(max_count, new_cap)]
+    stale = new + stale[:max(0, max_count - len(new))]
     done = 0
     for i in range(0, len(stale), 100):
         batch = stale[i:i + 100]
@@ -1865,7 +1873,7 @@ def scrape_amazon_links():
         fair = None
         if price_budget:
             tabs_left = len(TAB_ROWS) - i
-            fair = [max(1, price_budget[0] // tabs_left)]
+            fair = [max(1, price_budget[0] // tabs_left), price_budget[0]]
             slice_cap = fair[0]
         last = scan_amazon_list(channels, web_pages, state_key, cleared, items_fn,
                                 exclude, by_date, name_map, keepa_tried, low_cache, all_asins,
@@ -2300,7 +2308,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # correct the moment the deal appears — no one-run delay.
     if low_cache is not None and KEEPA_API_KEY:
         cap = price_budget[0] if price_budget else KEEPA_MAX_PRICE_PER_RUN
-        used = keepa_low_refresh([_asin_from_url(l["url"]) for l in links], low_cache, cap)
+        pot = price_budget[1] if price_budget and len(price_budget) > 1 else 0
+        used = keepa_low_refresh([_asin_from_url(l["url"]) for l in links], low_cache, cap, pot)
         if price_budget:
             price_budget[0] -= used
         for l in links:
@@ -2662,6 +2671,7 @@ async function loadTab(tab){
 // DOS view is Amazon-only: other stores (AliExpress, PCComponentes, Worten,
 // coupon offers, ...) stay in the normal tabbed view.
 function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
+function asinOf(u){ const m = /:\/\/www\.amazon\.[^/]+\/(?:.*\/)?dp\/([A-Z0-9]{10})/.exec(u || ""); return m ? m[1] : ""; }
 // Real-time ordering: parse dates (mixed formats) — newest first everywhere.
 function dateMs(l){ const t = Date.parse(l.date || ""); return isNaN(t) ? 0 : t; }
 const byNewest = (a, b) => dateMs(b) - dateMs(a);
@@ -2746,7 +2756,10 @@ function render(){
     // Tiny product thumb, loaded by the browser straight from Amazon's CDN
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
     const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
-      esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">' : '';
+      esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">'
+      // Not priced by Keepa yet: Amazon's ASIN image (a 1x1 gif when it has none).
+      : (asinOf(l.url) ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/P/'+
+        asinOf(l.url)+'.01._SL96_.jpg" onload="if(this.naturalWidth<2)this.remove()" onerror="this.remove()">' : '');
     // Affiliate platform (Awin, TradeTracker, CJ, ...) up front, for reference.
     const stref = l.net ? '<span class="stref" title="Plataforma de afiliação">'+esc(l.net)+'</span>' : '';
     // Deal on several lists: tint the row, stronger the more lists carry it.
