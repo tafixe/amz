@@ -673,7 +673,7 @@ def write_store_tabs(cleared: dict):
 # ASIN map for the community deals site: thread id -> ASIN ("" = deal page
 # checked, no Amazon link found). Persisted in R2 so each page is fetched once.
 CHOLLO_MAP_KEY = "data/chollo_map.json"
-CHOLLO_MAX_DEAL_FETCH = int(os.environ.get("CHOLLO_MAX_DEAL_FETCH", "12"))
+CHOLLO_MAX_DEAL_FETCH = int(os.environ.get("CHOLLO_MAX_DEAL_FETCH", "25"))
 
 
 def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
@@ -725,25 +725,34 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
     fetched = 0
     for tid, t in threads.items():
         asin = tmap.get(tid)
-        if asin is None:                      # deal page never looked at
+        if asin is None or asin == "":        # never looked at / legacy miss
             if fetched >= CHOLLO_MAX_DEAL_FETCH:
                 continue                      # picked up on a later run
             fetched += 1
+            # The deal button's redirect carries the merchant URL in its
+            # Location header. Read it without following (no store hit).
+            redirected = False
             try:
-                page = sess.get(f"{base}/ofertas/{t.get('titleSlug', 'x')}-{tid}",
-                                timeout=30).text
-                if len(page) < 2000:          # slug drift -> meta-refresh stub
-                    rm = re.search(r"url='?\"?(https?://[^'\">]+)", page)
-                    if rm:
-                        page = sess.get(html.unescape(rm.group(1)), timeout=30).text
-            except requests.RequestException as e:
-                log.warning("chollo deal %s: %s", tid, e)
-                continue
-            am = (re.search(r"oferta\\?/amazon_([a-zA-Z0-9]{10})\b", page)
-                  or re.search(r"amazon\.es\\?/(?:[^\"'<>\s]*?\\?/)?dp\\?/([A-Z0-9]{10})", page))
-            asin = am.group(1).upper() if am else ""
-            tmap[tid] = asin                  # "" caches the misses too
-        if not asin:
+                r = sess.get(f"{base}/visit/threadmain/{tid}", timeout=30, allow_redirects=False)
+                redirected = r.status_code in (301, 302, 303, 307, 308)
+                loc = unquote(r.headers.get("Location", ""))
+            except requests.RequestException:
+                loc = ""
+            am = re.search(r"amazon\.[a-z.]+/(?:[^?\s]*?/)?dp/([A-Z0-9]{10})", loc)
+            if not am and not redirected:     # blocked: try the deal page itself
+                try:
+                    page = sess.get(f"{base}/ofertas/{t.get('titleSlug', 'x')}-{tid}",
+                                    timeout=30).text
+                except requests.RequestException as e:
+                    log.warning("chollo deal %s: %s", tid, e)
+                    continue
+                am = (re.search(r"oferta\\?/amazon_([a-zA-Z0-9]{10})\b", page)
+                      or re.search(r"amazon\.es\\?/(?:[^\"'<>\s]*?\\?/)?dp\\?/([A-Z0-9]{10})", page))
+                if not am:
+                    continue                  # not cached: retried next run
+            asin = am.group(1).upper() if am else "-"
+            tmap[tid] = asin                  # "-" caches real non-Amazon/misses
+        if asin == "-":
             continue
         ts = t.get("publishedAt")
         date = datetime.fromtimestamp(int(ts), timezone.utc).isoformat() if ts else ""
