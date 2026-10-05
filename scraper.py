@@ -840,11 +840,36 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
             low_cache[a] = {"low": low, "checked": now.isoformat(),
                             "cat": p.get("rootCategory"),
                             "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, ""),
-                            "rank": rank, "i": img}
+                            "rank": rank, "i": img, "kx": _keepa_extras(p)}
             done += 1
     log.info("keepa low: refreshed %d asins, %d now at all-time low",
              done, sum(1 for v in low_cache.values() if v.get("low")))
     return done
+
+
+def _keepa_extras(p: dict) -> dict:
+    """Deal conditions Keepa already sends in the same response (no extra
+    token): clip coupon, Subscribe&Save coupon, Prime-only / flash deal badge
+    and the Subscribe&Save promo. Coupon values: >0 = cents off, <0 = % off."""
+    kx = {}
+    cp = p.get("coupon") or []
+    if len(cp) > 0 and isinstance(cp[0], int) and cp[0]:
+        kx["cp"] = cp[0]
+    if len(cp) > 1 and isinstance(cp[1], int) and cp[1]:
+        kx["sc"] = cp[1]
+    for d in p.get("deals") or []:
+        if not isinstance(d, dict):
+            continue
+        if "PRIME" in (d.get("accessType") or ""):
+            kx["pr"] = 1
+        if d.get("badge"):
+            kx["db"] = d["badge"]
+        break
+    for pr in p.get("promotions") or []:
+        if isinstance(pr, dict) and pr.get("type") == "SNS" and pr.get("discountPercent"):
+            kx["sn"] = pr["discountPercent"]
+            break
+    return kx
 
 
 def keepa_titles(asins: list) -> tuple:
@@ -2316,6 +2341,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             e = low_cache.get(_asin_from_url(l["url"])) or {}
             if e.get("i"):
                 l["img"] = e["i"]   # CDN filename; the browser builds the URL
+            if e.get("kx"):
+                l["kx"] = e["kx"]   # Keepa deal conditions (coupon, Prime, ...)
             if e.get("low"):
                 l["low"] = True
                 if e.get("min"):
@@ -2445,6 +2472,10 @@ def generate_amazon_html() -> str:
   li .name { flex:1; word-break:break-word; }
   li .tag { color:var(--muted); font-size:11px; flex-shrink:0; white-space:nowrap; }
   li .tag.disc { color:var(--brand); font-weight:700; }
+  li .tag.kx { margin-left:6px; border:1px solid var(--border); border-radius:6px; padding:1px 6px; }
+  li .tag.kx.cp { border-color:#16a34a; color:#22c55e; font-weight:700; }
+  li .tag.kx.prime { border-color:#1d9bf0; color:#38bdf8; font-weight:700; }
+  li .tag.kx.sn { opacity:.7; }
   li .cpn { flex-shrink:0; margin-left:8px; border:1px solid var(--brand); color:var(--brand);
     background:transparent; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700;
     cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; }
@@ -2593,7 +2624,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, shop:l.shop||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, shop:l.shop||"", kx:l.kx||null }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -2747,6 +2778,14 @@ function render(){
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>' : '') +
       (l.extra ? '<span class="tag'+(l.disc?' disc':'')+'" title="Data de publicação">'+
           (l.store?'pub. ':'')+esc(l.extra)+'</span>' : '');
+    // Keepa deal conditions: clip coupon, Prime-only deal, flash deal, S&S coupon.
+    const kv = v => v > 0 ? '-'+(v/100).toFixed(2).replace(/\.00$/,'')+'€' : v+'%';
+    const k = l.kx || {};
+    const kxt = (k.pr ? '<span class="tag kx prime" title="'+esc(k.db||'Oferta exclusiva Prime')+'">Prime</span>' : '') +
+      (!k.pr && k.db ? '<span class="tag kx" title="'+esc(k.db)+'">⚡ '+esc(k.db)+'</span>' : '') +
+      (k.cp ? '<span class="tag kx cp" title="Cupão Amazon (marcar na página)">cupão '+kv(k.cp)+'</span>' : '') +
+      (k.sc ? '<span class="tag kx" title="Cupão Subscreve e Poupa">S&amp;P '+kv(k.sc)+'</span>' : '') +
+      (k.sn && !k.sc ? '<span class="tag kx sn" title="Subscreve e Poupa">S&amp;P -'+k.sn+'%</span>' : '');
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
     const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
     // Click-to-copy coupon chip (stops the row link from opening).
@@ -2770,7 +2809,7 @@ function render(){
     const shopName = l.shop || (l.wt ? 'Worten' : '');
     const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'" data-date="'+esc(l.date||"")+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + val + src + tag +
+      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + kxt + val + src + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
       const s = l.store || "Outras";
