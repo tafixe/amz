@@ -50,6 +50,12 @@ try:
 except:
     pass
 
+# Extra Telegram tab ("JP"): channel names in a secret (JSON list).
+try:
+    JP_CHANNELS = json.loads(os.environ.get("JP_CHANNELS_JSON", "[]") or "[]")
+except ValueError:
+    JP_CHANNELS = []
+
 # Web pages to scan for Amazon links (JSON format)
 AMAZON_WEB_PAGES = []
 _web_json = os.environ.get("AMAZON_WEB_PAGES_JSON", "[]")
@@ -185,12 +191,19 @@ def _affiliate_tag_for(marketplace: str) -> str:
 CUSTOM_ASIN_RE = re.compile(r"https?://[^\s\"'<>)]+?/amz/([A-Z0-9]{10})", re.IGNORECASE)
 
 
+_WRAP_RE = re.compile(r"https?://(?:[a-z]+\.)?facebook\.com/(?:flx/warn/|l\.php)\?u=([^&\s\"'<>]+)[^\s\"'<>]*",
+                      re.IGNORECASE)
+
+
 def extract_amazon_urls(text: str) -> list[str]:
     """Find all raw Amazon URLs (long or short) inside a blob of text/HTML,
     plus custom /amz/<ASIN> shortener links (converted to amazon.es)."""
     if not text:
         return []
     t = html.unescape(text)
+    # Link-warning wrappers (facebook.com/flx/warn/?u=<encoded url>, l.php):
+    # unwrap so the real Amazon URL is matched, not the wrapper.
+    t = _WRAP_RE.sub(lambda m: unquote(m.group(1)), t)
     found = []
     for m in AMAZON_HOST_RE.finditer(t):
         url = m.group(0).rstrip(".,);]​")
@@ -1888,6 +1901,7 @@ def scrape_amazon_links():
         ([], [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_g4_items, "data/g4.json"),
+        (JP_CHANNELS, [], None, "data/jp.json"),
     ] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5", "f6")]
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
@@ -1895,7 +1909,7 @@ def scrape_amazon_links():
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
-                                "data/terapia.json", "data/dib.json", "data/g4.json",
+                                "data/terapia.json", "data/dib.json", "data/g4.json", "data/jp.json",
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -2588,6 +2602,7 @@ const TABS = [
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
+  { id:"jp",     label:"JP",         src:"/data/jp.json",           kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
