@@ -683,6 +683,110 @@ def write_store_tabs(cleared: dict):
         log.info("[%s] store tab: %d links (%d new this run)", key, len(links), fresh)
 
 
+# ---------------------------------------------------------------------------
+# "xaxu" tab: a deals site's newest-first stream (its home listing, N pages).
+# Its outbound "go to the deal" links sit behind a bot challenge, so the ASIN
+# is not reachable: rows open the deal page itself, where the code, price and
+# store button are. Amazon cards fill the tab; AliExpress / PcComponentes cards
+# join their store tabs. The base URL lives in a secret (XAXU_URL).
+# ---------------------------------------------------------------------------
+XAXU_KEY = "data/xaxu.json"
+XAXU_PAGES = int(os.environ.get("XAXU_PAGES", "4"))          # ~4h of posts per page
+XAXU_KEEP_HOURS = int(os.environ.get("XAXU_KEEP_HOURS", "48"))
+
+
+def _xaxu_when(txt: str, now: datetime) -> str:
+    """'hace 1 h, 6 m' / 'hace 54 m' / 'hace 2 d' -> ISO time; '' otherwise
+    (older cards only show a day like '21 oct.')."""
+    t = " ".join((txt or "").split()).lower()
+    m = re.fullmatch(r"hace\s+(?:(\d+)\s*d[a-zí]*,?\s*)?(?:(\d+)\s*h,?\s*)?(?:(\d+)\s*m(?:in)?)?", t)
+    if m and any(m.groups()):
+        d, h, mi = (int(x or 0) for x in m.groups())
+        return (now - timedelta(days=d, hours=h, minutes=mi)).replace(second=0, microsecond=0).isoformat()
+    return ""
+
+
+def _xaxu_img_time(sess, base: str, did: str) -> str:
+    """Publication time from the deal image's Last-Modified header (fallback)."""
+    try:
+        lm = sess.head(f"{base}/images/deals/{did}_1.jpg", timeout=20).headers.get("Last-Modified")
+        return email.utils.parsedate_to_datetime(lm).astimezone(timezone.utc).isoformat() if lm else ""
+    except (requests.RequestException, TypeError, ValueError):
+        return ""
+
+
+def _xaxu_code(txt: str) -> str:
+    """The card's code box holds either a bare code or a description
+    ('Descuento en carrito'). A single upper-case token is a code even
+    without digits; otherwise fall back to the generic extractor."""
+    t = " ".join(html.unescape(txt or "").split())
+    if re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{3,19}", t) and t not in _COUPON_STOPWORDS:
+        return t
+    return extract_coupon_code("cupón " + t)
+
+
+def scrape_xaxu(cleared: dict):
+    base = os.environ.get("XAXU_URL", "").rstrip("/")
+    if not base:
+        return
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    now = datetime.now(timezone.utc)
+    prev = {l["url"]: l for l in r2_get_amazon_links(XAXU_KEY).get("links", []) if l.get("url")}
+    rows: dict = {}
+    seen = 0
+    for page in range(1, XAXU_PAGES + 1):
+        try:
+            h = sess.get(f"{base}/" + (f"?page={page}" if page > 1 else ""), timeout=30).text
+        except requests.RequestException as e:
+            log.warning("xaxu page %d: %s", page, e)
+            break
+        cards = re.findall(r'<article class="fich">(.*?)</article>', h, re.S)
+        if not cards:
+            break
+        for c in cards:
+            m = re.search(r'<h3><a href="([^"]+/(\d+)/)"[^>]*>([^<]+)</a>', c)
+            if not m:
+                continue
+            seen += 1
+            url, did = m.group(1), m.group(2)
+            if url.startswith("/"):
+                url = base + url
+            title = _clean_name(html.unescape(m.group(3)))
+            store = (re.search(r'data-ga-store-name="([^"]+)"', c) or [None, ""])[1].lower()
+            old = prev.get(url) or rows.get(url)
+            date = (old or {}).get("date", "")
+            if not date:   # first sight: card's relative time (minute-exact)
+                tm = re.search(r'class="time">\s*([^<]+)', c)
+                date = (_xaxu_when(tm.group(1) if tm else "", now)
+                        or _xaxu_img_time(sess, base, did) or now.isoformat())
+            coupon = _xaxu_code((re.search(r'<div class="code"><span>([^<]*)</span>', c) or [None, ""])[1])
+            if store == "amazon":
+                cost = (re.search(r'class="cost">([^<]+)<', c) or [None, ""])[1].strip()
+                prct = (re.search(r'class="prct">\(?([^<)]+)\)?<', c) or [None, ""])[1].strip()
+                price = " · " + cost + (f" ({prct})" if prct else "") if cost else ""
+                row = {"url": url, "date": date, "name": title + price,
+                       "img": f"{base}/images/deals/thumbnails/{did}_1_thumb_118_118.webp"}
+                if coupon:
+                    row["coupon"] = coupon
+                rows[url] = row
+            elif store.startswith("aliexpress"):
+                store_add("aliexpress", url, date, coupon, title)
+            elif store.startswith("pccomponentes"):
+                store_add("pcc", url, date, coupon, title)
+    # Keep earlier rows that scrolled past the pages read, within the window.
+    cutoff = now - timedelta(hours=XAXU_KEEP_HOURS)
+    for url, l in prev.items():
+        if url not in rows and (_parse_dt(l.get("date")) or now) >= cutoff:
+            rows[url] = l
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    links = [l for l in rows.values() if not _hidden(cleared, l["url"], l.get("date", ""))]
+    links.sort(key=lambda l: _parse_dt(l.get("date")) or _epoch, reverse=True)
+    links = links[:300]
+    r2_put_amazon_links({"updated": now.isoformat(), "links": links}, XAXU_KEY)
+    log.info("[%s] %d cards read, %d Amazon rows kept", XAXU_KEY, seen, len(links))
+
+
 # ASIN map for the community deals site: thread id -> ASIN ("" = deal page
 # checked, no Amazon link found). Persisted in R2 so each page is fetched once.
 CHOLLO_MAP_KEY = "data/chollo_map.json"
@@ -2005,6 +2109,12 @@ def scrape_amazon_links():
         name_map = dict(list(name_map.items())[-80000:])
     r2_put_amazon_links({"n": name_map, "tried": sorted(keepa_tried)[-100000:]}, NAMES_KEY)
 
+    # xaxu tab (own writer: rows open the deal page); also feeds store tabs.
+    try:
+        scrape_xaxu(cleared)
+    except Exception as e:   # one source must never break the run
+        log.error("xaxu tab failed: %s", e)
+
     # Non-Amazon store tabs, fed transversally by every source above.
     write_store_tabs(cleared)
 
@@ -2603,6 +2713,7 @@ const TABS = [
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
   { id:"jp",     label:"JP",         src:"/data/jp.json",           kind:"tg" },
+  { id:"xaxu",   label:"xaxu",       src:"/data/xaxu.json",         kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
@@ -2818,8 +2929,8 @@ function render(){
     const src = (l.srcTab && !dosMode) ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
     // Tiny product thumb, loaded by the browser straight from Amazon's CDN
     // (._SL96_ = small variant). Hidden automatically if it fails to load.
-    const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/I/'+
-      esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1'))+'" onerror="this.remove()">'
+    const th = l.img ? '<img class="thumb" loading="lazy" alt="" src="'+(/^https?:/.test(l.img) ? esc(l.img)
+      : 'https://m.media-amazon.com/images/I/'+esc(l.img.replace(/\\.([A-Za-z]+)$/, '._SL96_.$1')))+'" onerror="this.remove()">'
       // Not priced by Keepa yet: Amazon's ASIN image (a 1x1 gif when it has none).
       : (asinOf(l.url) ? '<img class="thumb" loading="lazy" alt="" src="https://m.media-amazon.com/images/P/'+
         asinOf(l.url)+'.01._SL96_.jpg" onload="if(this.naturalWidth<2)this.remove()" onerror="this.remove()">' : '');

@@ -44,5 +44,6 @@ jobs:
           REF_TOKEN: ${{ secrets.REF_TOKEN }}
           G4_FEED: ${{ secrets.G4_FEED }}
           JP_CHANNELS_JSON: ${{ secrets.JP_CHANNELS_JSON }}
+          XAXU_URL: ${{ secrets.XAXU_URL }}
           KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
         run: python scraper.py --amazon
