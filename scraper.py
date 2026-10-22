@@ -447,15 +447,36 @@ _COUPON_CODE_RE = re.compile(
     r"[^A-Za-z0-9]{0,15}([A-Z0-9]{5,15})\b")
 _COUPON_STOPWORDS = {"AMAZON", "PRIME", "DESCUENTO", "OFERTA", "PRODUCTO", "CODIGO", "CUPON"}
 
+# Deal-blog plugins mark the code up explicitly: an element whose class names
+# it (e.g. "couponcode") or a data-coupon attribute. Explicit markup needs no
+# digit (seller codes like "IEIZDMXY" are letters only).
+_COUPON_MARKUP_RE = re.compile(
+    r'(?:class="[^"]*(?:couponcode|coupon[-_]code|cupon[-_]code|codigo[-_]cupon)[^"]*"[^>]*>'
+    r'|data-(?:coupon|cupon)=")\s*([A-Za-z0-9][A-Za-z0-9_-]{3,19})\s*[<"]')
+_CONSONANT_RUN_RE = re.compile(r"[B-DF-HJ-NP-TV-Z]{3}")
+
+
+def _letters_code(code: str) -> bool:
+    """A letters-only token passes as a code only in Amazon's 8-character
+    promo-code shape with a consonant run no word has ("IEIZDMXY"), so plain
+    words after 'cupón' ("AHORRAS", "APLICADO") still never become chips."""
+    return len(code) == 8 and code.isalpha() and bool(_CONSONANT_RUN_RE.search(code))
+
+
 def extract_coupon_code(text: str) -> str:
     """Pull a checkout coupon code out of free text/HTML, or '' if none found."""
     if not text:
         return ""
+    m = _COUPON_MARKUP_RE.search(text)
+    if m and m.group(1).upper() not in _COUPON_STOPWORDS:
+        return m.group(1)
     plain = re.sub(r"<[^>]+>", " ", text)        # drop HTML tags so adjacency holds
     for m in _COUPON_CODE_RE.finditer(plain):
         code = m.group(1)
-        if any(ch.isdigit() for ch in code) and code not in _COUPON_STOPWORDS:
-            return code                          # require a digit -> real code, not a word
+        if code in _COUPON_STOPWORDS:
+            continue
+        if any(ch.isdigit() for ch in code) or _letters_code(code):
+            return code                          # digit (or promo-code shape) -> real code
     return ""
 
 
