@@ -17,7 +17,7 @@ try:
     LISBON_TZ = ZoneInfo("Europe/Lisbon")
 except Exception:
     LISBON_TZ = timezone.utc
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -49,6 +49,15 @@ try:
     AMAZON_TELEGRAM_CHANNELS = json.loads(_tg_json)
 except:
     pass
+
+# More Telegram channels, by tab id, from one secret (JSON object):
+# new tabs ("super", "erdc", "caza") and channels merged into an existing
+# tab ("terapia"). Channel names never live in the code.
+try:
+    TG_TABS = json.loads(os.environ.get("TG_TABS_JSON", "{}") or "{}")
+except ValueError:
+    TG_TABS = {}
+TG_NEW_TABS = ("super", "erdc", "caza")
 
 # Extra Telegram tab ("JP"): channel names in a secret (JSON list).
 try:
@@ -165,16 +174,20 @@ def r2_headers() -> dict:
 
 AMAZON_STATE_KEY = "data/amazon_links.json"
 
+# Sources' own shorteners that redirect to Amazon products (secret, by host).
+_EXTRA_SHORT = tuple(h.lower() for h in TG_TABS.get("short_hosts", []) if isinstance(h, str) and h)
+
 # Hosts that point at an Amazon product (long domains + short redirectors).
 AMAZON_HOST_RE = re.compile(
     r"https?://[^\s\"'<>)]*?(?:"
     r"amazon\.[a-z.]{2,7}"               # amazon.es, amazon.com, amazon.co.uk ...
-    r"|amzn\.to|amzn\.eu|a\.co|amzlink\.to"  # short redirectors
+    r"|amzn\.to|amzn\.eu|(?<=//)a\.co(?=/)|amzlink\.to"  # short redirectors
     r"|link\.amazon(?=/)"                # .amazon-gTLD shortener (path = code)
+    + "".join(r"|(?<=//)" + re.escape(h) + r"(?=/)" for h in _EXTRA_SHORT) +  # sources' own
     r")[^\s\"'<>)]*",
     re.IGNORECASE,
 )
-AMAZON_SHORT_HOSTS = ("amzn.to", "amzn.eu", "a.co", "amzlink.to", "link.amazon")
+AMAZON_SHORT_HOSTS = ("amzn.to", "amzn.eu", "a.co", "amzlink.to", "link.amazon") + _EXTRA_SHORT
 # ASIN inside a product path: /dp/ASIN, /gp/product/ASIN, /gp/aw/d/ASIN, /product/ASIN
 ASIN_RE = re.compile(
     r"/(?:dp|gp/product|gp/aw/d|product|gp/aw/d|gp/offer-listing)/([A-Z0-9]{10})",
@@ -706,14 +719,15 @@ def write_store_tabs(cleared: dict):
 
 # ---------------------------------------------------------------------------
 # "xaxu" tab: a deals site's newest-first stream (its home listing, N pages).
-# Its outbound "go to the deal" links sit behind a bot challenge, so the ASIN
-# is not reachable: rows open the deal page itself, where the code, price and
-# store button are. Amazon cards fill the tab; AliExpress / PcComponentes cards
-# join their store tabs. The base URL lives in a secret (XAXU_URL).
+# Its outbound "go to the deal" links sit behind a bot challenge (never
+# bypassed), so each Amazon card's ASIN comes from a Keepa title search,
+# accepted only when title, numbers and price agree; those rows get the direct
+# amazon.es link. Cards without a confident match keep a row that opens the
+# deal page. AliExpress / PcComponentes cards join their store tabs. The base
+# URL lives in a secret (XAXU_URL).
 # ---------------------------------------------------------------------------
 XAXU_KEY = "data/xaxu.json"
 XAXU_PAGES = int(os.environ.get("XAXU_PAGES", "4"))          # ~4h of posts per page
-XAXU_KEEP_HOURS = int(os.environ.get("XAXU_KEEP_HOURS", "48"))
 
 
 def _xaxu_when(txt: str, now: datetime) -> str:
@@ -736,8 +750,8 @@ def _xaxu_img_time(sess, base: str, did: str) -> str:
         return ""
 
 
-def _xaxu_code(txt: str) -> str:
-    """The card's code box holds either a bare code or a description
+def _code_field(txt: str) -> str:
+    """A dedicated code field holds either a bare code or a description
     ('Descuento en carrito'). A single upper-case token is a code even
     without digits; otherwise fall back to the generic extractor."""
     t = " ".join(html.unescape(txt or "").split())
@@ -746,66 +760,172 @@ def _xaxu_code(txt: str) -> str:
     return extract_coupon_code("cupón " + t)
 
 
-def scrape_xaxu(cleared: dict):
+XAXU_MAP_KEY = "data/xaxu_map.json"
+XAXU_SEARCH_MAX = int(os.environ.get("XAXU_SEARCH_MAX", "4"))   # Keepa searches per run
+_XAXU_UNMAPPED: list = []   # Amazon cards without a confirmed ASIN this run
+_XAXU_CTX: dict = {}        # run context (hide-on-open map) set before the tabs loop
+
+_KP_STOP = {"de", "del", "la", "el", "los", "las", "con", "para", "en", "y", "a", "al",
+            "por", "un", "una", "o", "e", "the", "and", "for", "with", "of", "x"}
+
+
+def _kp_tokens(s: str) -> list:
+    """Accent-folded tokens; letters and digits split ('40kPa' -> 40, kpa) so
+    both titles tokenize the same way whatever their spacing."""
+    s = unicodedata.normalize("NFKD", (s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)", " ", s)
+    return [t for t in re.findall(r"[a-z0-9]+", s) if t not in _KP_STOP]
+
+
+def _eur(txt: str) -> float:
+    """'1.299,00€' -> 1299.0 ; '' -> 0."""
+    t = re.sub(r"[^\d,.]", "", txt or "").replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _xaxu_keepa_match(title: str, prices: tuple) -> tuple:
+    """Find the card's ASIN with a Keepa title search (10 tokens) and accept a
+    result only when it is clearly the same product: (almost) every word of
+    the card title, every number (40 kPa, pack of 2, model codes) and, when the
+    words alone are not decisive, the price. Returns (asin or "", tokensLeft);
+    asin is None when the API gave no answer (retried next run)."""
+    try:
+        d = requests.get("https://api.keepa.com/search", timeout=60, params={
+            "key": KEEPA_API_KEY, "domain": KEEPA_DOMAIN, "type": "product",
+            "term": title, "stats": 1, "history": 0}).json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning("xaxu keepa search: %s", e)
+        return None, None
+    left = d.get("tokensLeft")
+    prods = d.get("products")
+    if prods is None:
+        return None, left
+    q = set(_kp_tokens(title))
+    if len(q) < 2:
+        return "", left
+    nums = {t for t in q if t.isdigit()}
+    scored = []
+    for pr in prods:
+        c = set(_kp_tokens(pr.get("title") or ""))
+        if not c or not pr.get("asin"):
+            continue
+        cov = len(q & c) / len(q)
+        cur = (pr.get("stats") or {}).get("current") or []
+        vals = [cur[i] / 100 for i in (0, 1, 18, 10, 7)
+                if i < len(cur) and isinstance(cur[i], int) and cur[i] > 0]
+        price_ok = any(abs(v - ref) / ref <= 0.07 for v in vals for ref in prices if ref)
+        scored.append((round(cov, 3), nums <= c, price_ok, pr["asin"]))
+    scored.sort(reverse=True)
+    ok = [x for x in scored if x[1] and (x[0] >= 0.75 or (x[0] >= 0.6 and x[2]))]
+    if not ok:
+        return "", left
+    best = ok[0]
+    rival = next((x for x in scored if x[3] != best[3]), None)
+    # Two near-identical candidates (colour/size variants): only the price can
+    # tell them apart; otherwise leave the card on the deal page.
+    if rival and rival[1] and rival[0] >= best[0] - 0.05 and not (best[2] and not rival[2]):
+        return "", left
+    return best[3], left
+
+
+def get_xaxu_items() -> list:
+    """items_fn for the xaxu tab: (amazon_url, date, coupon, low, name) for the
+    Amazon cards whose ASIN is known; cards still without one go to
+    _XAXU_UNMAPPED (their row opens the deal page). Per card, the ASIN and the
+    first-seen time are cached, so each card costs one search, once."""
+    _XAXU_UNMAPPED.clear()
     base = os.environ.get("XAXU_URL", "").rstrip("/")
     if not base:
-        return
+        return []
     sess = requests.Session()
     sess.headers.update(_BROWSER_HEADERS)
     now = datetime.now(timezone.utc)
-    prev = {l["url"]: l for l in r2_get_amazon_links(XAXU_KEY).get("links", []) if l.get("url")}
-    rows: dict = {}
-    seen = 0
+    xmap: dict = r2_get_amazon_links(XAXU_MAP_KEY).get("m", {})
+    out, seen, searches, cards = [], set(), 0, 0
     for page in range(1, XAXU_PAGES + 1):
         try:
             h = sess.get(f"{base}/" + (f"?page={page}" if page > 1 else ""), timeout=30).text
         except requests.RequestException as e:
             log.warning("xaxu page %d: %s", page, e)
             break
-        cards = re.findall(r'<article class="fich">(.*?)</article>', h, re.S)
-        if not cards:
+        arts = re.findall(r'<article class="fich">(.*?)</article>', h, re.S)
+        if not arts:
             break
-        for c in cards:
+        for c in arts:
             m = re.search(r'<h3><a href="([^"]+/(\d+)/)"[^>]*>([^<]+)</a>', c)
-            if not m:
+            if not m or m.group(2) in seen:
                 continue
-            seen += 1
+            seen.add(m.group(2))
+            cards += 1
             url, did = m.group(1), m.group(2)
             if url.startswith("/"):
                 url = base + url
             title = _clean_name(html.unescape(m.group(3)))
             store = (re.search(r'data-ga-store-name="([^"]+)"', c) or [None, ""])[1].lower()
-            old = prev.get(url) or rows.get(url)
-            date = (old or {}).get("date", "")
-            if not date:   # first sight: card's relative time (minute-exact)
+            ent = xmap.get(did) or {}
+            date = ent.get("d", "")
+            if not date:   # first sight: the card's relative time (minute-exact)
                 tm = re.search(r'class="time">\s*([^<]+)', c)
                 date = (_xaxu_when(tm.group(1) if tm else "", now)
                         or _xaxu_img_time(sess, base, did) or now.isoformat())
-            coupon = _xaxu_code((re.search(r'<div class="code"><span>([^<]*)</span>', c) or [None, ""])[1])
-            if store == "amazon":
-                cost = (re.search(r'class="cost">([^<]+)<', c) or [None, ""])[1].strip()
-                prct = (re.search(r'class="prct">\(?([^<)]+)\)?<', c) or [None, ""])[1].strip()
-                price = " · " + cost + (f" ({prct})" if prct else "") if cost else ""
-                row = {"url": url, "date": date, "name": title + price,
+            coupon = _code_field((re.search(r'<div class="code"><span>([^<]*)</span>', c) or [None, ""])[1])
+            if store.startswith("aliexpress"):
+                store_add("aliexpress", url, date, coupon, title)
+                continue
+            if store.startswith("pccomponentes"):
+                store_add("pcc", url, date, coupon, title)
+                continue
+            if store != "amazon":
+                continue
+            cost = (re.search(r'class="cost">([^<]+)<', c) or [None, ""])[1].strip()
+            offr = (re.search(r'class="offr">([^<]+)<', c) or [None, ""])[1].strip()
+            prct = (re.search(r'class="prct">\(?([^<)]+)\)?<', c) or [None, ""])[1].strip()
+            asin = ent.get("a")
+            if asin is None and KEEPA_API_KEY and searches < XAXU_SEARCH_MAX:
+                searches += 1
+                asin, left = _xaxu_keepa_match(title, (_eur(cost), _eur(offr)))
+                if left is not None and left < 120:
+                    searches = XAXU_SEARCH_MAX     # leave tokens for pricing
+                if asin is not None:
+                    asin = asin or "-"
+            xmap[did] = {"d": date, **({"a": asin} if asin else {})}
+            name = title + (" · " + cost + (f" ({prct})" if prct else "") if cost else "")
+            if _hidden(_XAXU_CTX.get("cleared") or {}, url, date):
+                continue   # already opened while its row still pointed to the deal page
+            if asin and asin != "-":
+                out.append((f"https://www.amazon.es/dp/{asin}", date, coupon, False, name))
+            else:
+                row = {"url": url, "date": date, "name": name,
                        "img": f"{base}/images/deals/thumbnails/{did}_1_thumb_118_118.webp"}
                 if coupon:
                     row["coupon"] = coupon
-                rows[url] = row
-            elif store.startswith("aliexpress"):
-                store_add("aliexpress", url, date, coupon, title)
-            elif store.startswith("pccomponentes"):
-                store_add("pcc", url, date, coupon, title)
-    # Keep earlier rows that scrolled past the pages read, within the window.
-    cutoff = now - timedelta(hours=XAXU_KEEP_HOURS)
-    for url, l in prev.items():
-        if url not in rows and (_parse_dt(l.get("date")) or now) >= cutoff:
-            rows[url] = l
+                _XAXU_UNMAPPED.append(row)
+    if len(xmap) > 5000:
+        xmap = dict(sorted(xmap.items(), key=lambda kv: int(kv[0]))[-5000:])
+    r2_put_amazon_links({"m": xmap}, XAXU_MAP_KEY)
+    log.info("xaxu: %d cards, %d Amazon with ASIN, %d without yet, %d Keepa searches",
+             cards, len(out), len(_XAXU_UNMAPPED), searches)
+    return out
+
+
+def xaxu_add_unmapped(state: dict, cleared: dict):
+    """After the tab is written: add the Amazon cards still without an ASIN
+    (row opens the deal page), unless opened/hidden; newest first."""
+    if state is None or not _XAXU_UNMAPPED:
+        return
+    links = state.get("links", [])
+    have = {l["url"] for l in links}
+    for r in _XAXU_UNMAPPED:
+        if r["url"] not in have and not _hidden(cleared, r["url"], r.get("date", "")):
+            links.append(r)
     _epoch = datetime.min.replace(tzinfo=timezone.utc)
-    links = [l for l in rows.values() if not _hidden(cleared, l["url"], l.get("date", ""))]
     links.sort(key=lambda l: _parse_dt(l.get("date")) or _epoch, reverse=True)
-    links = links[:300]
-    r2_put_amazon_links({"updated": now.isoformat(), "links": links}, XAXU_KEY)
-    log.info("[%s] %d cards read, %d Amazon rows kept", XAXU_KEY, seen, len(links))
+    state["links"] = links
+    r2_put_amazon_links(state, XAXU_KEY)
 
 
 # ASIN map for the community deals site: thread id -> ASIN ("" = deal page
@@ -1350,10 +1470,34 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     return out
 
 
+MI_MAP_KEY = "data/mi_map.json"
+
+
+def _redirect_target(sess, url: str, stop: str = r"(?:^|\.)amazon\.[a-z.]+$", hops: int = 5) -> str:
+    """Follow a short link hop by hop and stop at the first URL whose host
+    matches `stop`, WITHOUT requesting that page (no visit to the store).
+    Returns '' when the chain does not reach such a host."""
+    cur = url
+    for _ in range(hops):
+        if re.search(stop, urlparse(cur).netloc.lower()):
+            return cur
+        try:
+            r = sess.get(cur, timeout=20, allow_redirects=False)
+        except requests.RequestException:
+            return ""
+        loc = r.headers.get("Location")
+        if not loc or r.status_code not in (301, 302, 303, 307, 308):
+            return ""
+        cur = urljoin(cur, loc)
+    return cur if re.search(stop, urlparse(cur).netloc.lower()) else ""
+
+
 def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
     """Deals from a JS-rendered aggregator's JSON API (newest first). Keep only
-    Amazon.es deals, resolve each offer link to its ASIN, and use the API's own
-    product name and publish date. Returns (amazon_url, iso_date, coupon, low, name)."""
+    Amazon.es deals, read each offer link's ASIN from its redirect (cached in
+    R2, so each link is opened once and the store page is never requested),
+    and use the API's own product name, coupon and publish date.
+    Returns (amazon_url, iso_date, coupon, low, name)."""
     out: list[tuple[str, str, str, bool, str]] = []
     base = SOURCES.get("mi_api", "")
     if not base:
@@ -1361,8 +1505,17 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
     sess = requests.Session()
     sess.headers.update(_BROWSER_HEADERS)
     sess.headers["Accept"] = "application/json"
+    mmap: dict = r2_get_amazon_links(MI_MAP_KEY).get("m", {})
     seen = set()
     resolved = 0
+
+    def _coupon(r: dict) -> str:
+        for cp in r.get("coupons") or []:
+            code = _code_field((cp or {}).get("code", "") if isinstance(cp, dict) else "")
+            if code:
+                return code
+        return ""
+
     for page in (1, 2):
         try:
             data = sess.get(f"{base}?page={page}&limit=50", timeout=40).json()
@@ -1378,36 +1531,45 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
                              for s in stores)
             target = ("aliexpress" if "aliexpress" in sdesc
                       else "pcc" if "pccomponentes" in sdesc else None)
+            ou = r.get("offer_url", "")
+            if not ou:
+                continue
             if target:   # tracked non-Amazon store -> the transversal store tab
-                ou = r.get("offer_url", "")
-                if ou and resolved < 60:
-                    try:
+                final = mmap.get(ou)
+                if final is None:
+                    if resolved >= 60:
+                        continue
+                    try:     # store product URL is the end of the chain
                         final = sess.get(ou, timeout=20, allow_redirects=True).url
-                        resolved += 1
                     except requests.RequestException:
                         continue
-                    want = r"aliexpress\." if target == "aliexpress" else r"pccomponentes\."
-                    if re.search(want, final):
-                        store_add(target, final, r.get("created_at") or "", "",
-                                  _clean_name(r.get("name", "")))
+                    resolved += 1
+                    mmap[ou] = final
+                want = r"aliexpress\." if target == "aliexpress" else r"pccomponentes\."
+                if re.search(want, final or ""):
+                    store_add(target, final, r.get("created_at") or "", _coupon(r),
+                              _clean_name(r.get("name", "")))
                 continue
             if not any(s.get("slug") == "amazon-es" or "amazon" in (s.get("name", "").lower()) for s in stores):
                 continue   # Amazon.es only
-            ou = r.get("offer_url", "")
-            if not ou or resolved >= 60:
-                continue
-            try:  # the offer link is a shortener that redirects to the product
-                final = sess.get(ou, timeout=20, allow_redirects=True).url
+            final = mmap.get(ou)
+            if final is None:
+                if resolved >= 60:
+                    continue                      # picked up on a later run
+                final = _redirect_target(sess, ou)
                 resolved += 1
-            except requests.RequestException:
-                continue
-            m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", final)
+                mmap[ou] = final
+            m = re.search(r"/(?:dp|gp/product|gp/offer-listing)/([A-Z0-9]{10})", final or "")
             if not m or m.group(1) in seen:
                 continue
             seen.add(m.group(1))
             out.append((f"https://www.amazon.es/dp/{m.group(1)}",
-                        r.get("created_at") or "", "", False, _clean_name(r.get("name", ""))))
-    log.info("mi: %d amazon.es deals", len(out))
+                        r.get("created_at") or "", _coupon(r), False, _clean_name(r.get("name", ""))))
+    if len(mmap) > 5000:
+        mmap = dict(list(mmap.items())[-5000:])
+    r2_put_amazon_links({"m": mmap}, MI_MAP_KEY)
+    log.info("mi: %d amazon.es deals (%d with coupon, %d links opened)",
+             len(out), sum(1 for o in out if o[2]), resolved)
     return out
 
 
@@ -2023,11 +2185,13 @@ def scrape_amazon_links():
         ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
         ([], [], get_camel_items, "data/camel.json"),
         ([], [], get_titas_items, "data/titas.json"),
-        ([], [], get_terapia_items, "data/terapia.json"),
+        (TG_TABS.get("terapia", []), [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_g4_items, "data/g4.json"),
         (JP_CHANNELS, [], None, "data/jp.json"),
-    ] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5", "f6")]
+        ([], [], get_xaxu_items, XAXU_KEY),
+    ] + [(TG_TABS[k], [], None, f"data/{k}.json") for k in TG_NEW_TABS if TG_TABS.get(k)] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5", "f6")]
+    _XAXU_CTX["cleared"] = cleared
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
         exclude = None
@@ -2035,6 +2199,7 @@ def scrape_amazon_links():
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", "data/g4.json", "data/jp.json",
+                                XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json",
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -2130,11 +2295,11 @@ def scrape_amazon_links():
         name_map = dict(list(name_map.items())[-80000:])
     r2_put_amazon_links({"n": name_map, "tried": sorted(keepa_tried)[-100000:]}, NAMES_KEY)
 
-    # xaxu tab (own writer: rows open the deal page); also feeds store tabs.
+    # xaxu: Amazon cards still without an ASIN keep a row that opens the deal page.
     try:
-        scrape_xaxu(cleared)
+        xaxu_add_unmapped(results.get(XAXU_KEY), cleared)
     except Exception as e:   # one source must never break the run
-        log.error("xaxu tab failed: %s", e)
+        log.error("xaxu unmapped rows: %s", e)
 
     # Non-Amazon store tabs, fed transversally by every source above.
     write_store_tabs(cleared)
@@ -2735,6 +2900,9 @@ const TABS = [
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
   { id:"jp",     label:"JP",         src:"/data/jp.json",           kind:"tg" },
   { id:"xaxu",   label:"xaxu",       src:"/data/xaxu.json",         kind:"tg" },
+  { id:"super",  label:"Super",      src:"/data/super.json",        kind:"tg" },
+  { id:"erdc",   label:"ERdC",       src:"/data/erdc.json",         kind:"tg" },
+  { id:"caza",   label:"Caza",       src:"/data/caza.json",         kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
