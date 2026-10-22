@@ -467,6 +467,10 @@ _COUPON_MARKUP_RE = re.compile(
     r'(?:class="[^"]*(?:couponcode|coupon[-_]code|cupon[-_]code|codigo[-_]cupon)[^"]*"[^>]*>'
     r'|data-(?:coupon|cupon)=")\s*([A-Za-z0-9][A-Za-z0-9_-]{3,19})\s*[<"]')
 _CONSONANT_RUN_RE = re.compile(r"[B-DF-HJ-NP-TV-Z]{3}")
+# "Aplicar cupón en el pago: CODE" — a few words between the keyword and a
+# colon right before the code (same digit / promo-shape rules apply).
+_COUPON_COLON_RE = re.compile(
+    r"(?i:c[oó]digo|cup[oó]n|cupon|cup[aã]o|cupao|cupom|coupon|code|promo)[^\n:<>]{0,25}:\s*([A-Z0-9]{5,15})\b")
 
 
 def _letters_code(code: str) -> bool:
@@ -484,12 +488,13 @@ def extract_coupon_code(text: str) -> str:
     if m and m.group(1).upper() not in _COUPON_STOPWORDS:
         return m.group(1)
     plain = re.sub(r"<[^>]+>", " ", text)        # drop HTML tags so adjacency holds
-    for m in _COUPON_CODE_RE.finditer(plain):
-        code = m.group(1)
-        if code in _COUPON_STOPWORDS:
-            continue
-        if any(ch.isdigit() for ch in code) or _letters_code(code):
-            return code                          # digit (or promo-code shape) -> real code
+    for rx in (_COUPON_CODE_RE, _COUPON_COLON_RE):
+        for m in rx.finditer(plain):
+            code = m.group(1)
+            if code in _COUPON_STOPWORDS:
+                continue
+            if any(ch.isdigit() for ch in code) or _letters_code(code):
+                return code                      # digit (or promo-code shape) -> real code
     return ""
 
 
