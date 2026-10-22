@@ -3045,7 +3045,15 @@ function visibleItems(){
         if (!isAmazon(l)) continue;
         if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
         const p = best.get(l.url);
-        if (!p || (l.x||1) > (p.x||1)) best.set(l.url, l);
+        if (!p) { best.set(l.url, Object.assign({}, l, { coupons: l.coupon ? [l.coupon] : [] })); continue; }
+        // Same product in several tabs: one row that gathers what each copy knows
+        // (every distinct coupon code, photo, all-time low, Keepa tags, newest date).
+        if (l.coupon && !p.coupons.includes(l.coupon)) p.coupons.push(l.coupon);
+        if ((l.x||1) > (p.x||1)) p.x = l.x;
+        if (!p.img && l.img) p.img = l.img;
+        if (!p.low && l.low) { p.low = true; p.minp = l.minp; p.minlbl = l.minlbl; }
+        if (!p.kx && l.kx) p.kx = l.kx;
+        if (dateMs(l) > dateMs(p)) { p.date = l.date; p.extra = l.extra; }
       }
     }
     return [...best.values()].sort((a, b) => ((b.x||1) - (a.x||1)) || byNewest(a, b));
@@ -3119,7 +3127,8 @@ function render(){
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
     const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
     // Click-to-copy coupon chip (stops the row link from opening).
-    const cpn = l.coupon ? '<button type="button" class="cpn" data-code="'+esc(l.coupon)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(l.coupon)+'</button>' : '';
+    const cpn = (l.coupons || (l.coupon ? [l.coupon] : [])).map(c =>
+      '<button type="button" class="cpn" data-code="'+esc(c)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(c)+'</button>').join('');
     // During transversal search, show which tab the result came from.
     const src = (l.srcTab && !dosMode) ? '<span class="tag srctab">'+esc(l.srcTab)+'</span>' : '';
     // Tiny product thumb, loaded by the browser straight from Amazon's CDN
