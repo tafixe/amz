@@ -845,7 +845,7 @@ def get_xaxu_items() -> list:
     sess.headers.update(_BROWSER_HEADERS)
     now = datetime.now(timezone.utc)
     xmap: dict = r2_get_amazon_links(XAXU_MAP_KEY).get("m", {})
-    out, seen, searches, cards = [], set(), 0, 0
+    out, seen, searches, cards, done = [], set(), 0, 0, 0
     for page in range(1, XAXU_PAGES + 1):
         try:
             h = sess.get(f"{base}/" + (f"?page={page}" if page > 1 else ""), timeout=30).text
@@ -887,9 +887,10 @@ def get_xaxu_items() -> list:
             asin = ent.get("a")
             if asin is None and KEEPA_API_KEY and searches < XAXU_SEARCH_MAX:
                 searches += 1
+                done += 1
                 asin, left = _xaxu_keepa_match(title, (_eur(cost), _eur(offr)))
-                if left is not None and left < 120:
-                    searches = XAXU_SEARCH_MAX     # leave tokens for pricing
+                if left is not None and left < 70:
+                    searches = XAXU_SEARCH_MAX     # leave the next run's pricing budget
                 if asin is not None:
                     asin = asin or "-"
             xmap[did] = {"d": date, **({"a": asin} if asin else {})}
@@ -908,7 +909,7 @@ def get_xaxu_items() -> list:
         xmap = dict(sorted(xmap.items(), key=lambda kv: int(kv[0]))[-5000:])
     r2_put_amazon_links({"m": xmap}, XAXU_MAP_KEY)
     log.info("xaxu: %d cards, %d Amazon with ASIN, %d without yet, %d Keepa searches",
-             cards, len(out), len(_XAXU_UNMAPPED), searches)
+             cards, len(out), len(_XAXU_UNMAPPED), done)
     return out
 
 
