@@ -57,7 +57,7 @@ try:
     TG_TABS = json.loads(os.environ.get("TG_TABS_JSON", "{}") or "{}")
 except ValueError:
     TG_TABS = {}
-TG_NEW_TABS = ("super", "erdc", "caza")
+TG_NEW_TABS = ("super", "erdc", "caza", "china")
 
 # Extra Telegram tab ("JP"): channel names in a secret (JSON list).
 try:
@@ -2205,7 +2205,7 @@ def scrape_amazon_links():
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", "data/g4.json", "data/jp.json",
-                                XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json",
+                                XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json", "data/china.json",
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -2909,6 +2909,7 @@ const TABS = [
   { id:"super",  label:"Super",      src:"/data/super.json",        kind:"tg" },
   { id:"erdc",   label:"ERdC",       src:"/data/erdc.json",         kind:"tg" },
   { id:"caza",   label:"Caza",       src:"/data/caza.json",         kind:"tg" },
+  { id:"china",  label:"China",      src:"/data/china.json",        kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
