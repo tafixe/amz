@@ -2965,20 +2965,29 @@ function normalize(tab, raw){
 }
 function urlsOf(id){ return (cache[id]||[]).map(l => l.url); }
 
-async function fetchTab(tab){
+// Feed versions come from /api/stamp (R2 etags). "?v=<etag>" makes each
+// version cacheable by the browser, so a reload or a tab switch re-uses it.
+const seen = {};        // "data/x.json" -> etag of the copy in `cache`
+let lastStamp = {};     // last /api/stamp answer
+function keyOf(src){ return src.slice(1); }   // "/data/x.json" -> "data/x.json"
+async function fetchTab(tab, etag){
   try {
-    const r = await fetch(tab.src + (tab.kind==="tg" ? "?t="+Date.now() : "?t="+Date.now()));
-    if (r.ok) cache[tab.id] = normalize(tab, await r.json());
+    const r = await fetch(tab.src + (etag ? "?v=" + encodeURIComponent(etag) : "?t=" + Date.now()));
+    if (r.ok) {
+      cache[tab.id] = normalize(tab, await r.json());
+      if (etag) seen[keyOf(tab.src)] = etag;
+    }
   } catch(e) { cache[tab.id] = cache[tab.id] || []; }
 }
 
 // Server-side hidden URLs (links opened/cleared on any device). Reuses the same
 // list the scraper already excludes, so hidden deals never come back.
-async function loadHidden(){
+async function loadHidden(etag){
   try {
-    const r = await fetch("/data/cleared.json?t="+Date.now());
+    const r = await fetch("/data/cleared.json" + (etag ? "?v=" + encodeURIComponent(etag) : "?t=" + Date.now()));
     if (r.ok) {
       const j = await r.json();
+      if (etag) seen["data/cleared.json"] = etag;
       serverHidden = Array.isArray(j) ? new Map(j.map(u => [u, ""])) : new Map(Object.entries(j || {}));
       // Re-assert hides made on this device that the server does not carry.
       const lost = [];
@@ -3023,7 +3032,9 @@ async function pumpHides(){
 }
 
 async function loadTab(tab){
-  if (!cache[tab.id] || tab.kind === "tg") await fetchTab(tab);
+  // Freshness comes from poll(); a tab switch only downloads a feed the page
+  // has never loaded (normally none — the first poll loads every feed).
+  if (!cache[tab.id]) await fetchTab(tab, lastStamp[keyOf(tab.src)]);
   // Viewing a tab marks its links as seen -> clears its green dot.
   lsAdd("amzKnown_"+tab.id, urlsOf(tab.id));
   NEW[tab.id] = false;
@@ -3188,15 +3199,58 @@ function applyDots(){
   });
 }
 
-// Check every live (tg) tab for links the user hasn't seen yet -> green dot.
-async function refreshDots(){
-  await Promise.all(TABS.filter(t => t.kind === "tg").map(async t => {
-    await fetchTab(t);
+// Green dot: a live (tg) tab has links the user hasn't seen yet. Local only.
+function recomputeDots(){
+  for (const t of TABS) {
+    if (t.kind !== "tg" || !cache[t.id]) continue;
     const known = knownSet(t.id);
-    NEW[t.id] = (cache[t.id]||[]).some(l => !known.has(l.url) && !isHidden(l));
-  }));
+    NEW[t.id] = cache[t.id].some(l => !known.has(l.url) && !isHidden(l));
+  }
   applyDots();
-  if (dosMode) render();   // merged view depends on every tab being loaded
+}
+
+// ── Refresh policy ─────────────────────────────────────────────────────────
+// Every request counts against the Cloudflare free plan: 100k Worker requests
+// per day for the WHOLE account, shared with ofertasninja.com. The old loop
+// re-downloaded cleared.json + all ~30 feeds every 30 s (~90k requests/day
+// per open tab) and blew the account limit on 2026-10-28. The feeds only
+// change when the scan runs (every 10 min), so now:
+//   - one GET /api/stamp per check (etag of every data file);
+//   - download only the files whose etag changed;
+//   - check every 60 s and never while the tab is hidden; coming back to the
+//     tab checks at once if the last check is older than 60 s.
+const POLL_MS = 60000;
+let lastPoll = 0;
+let polling = false;
+async function poll(force){
+  if (polling || (!force && document.hidden)) return;
+  polling = true; lastPoll = Date.now();
+  try {
+    let st = null;
+    try { const r = await fetch("/api/stamp", { cache: "no-store" }); if (r.ok) st = await r.json(); } catch(e) {}
+    let changedIds = [];
+    if (!st) {
+      // Stamp unavailable (worker not updated yet / network blip): refresh
+      // only what is on screen, never the whole set.
+      await loadHidden();
+      if (current.kind === "tg") { await fetchTab(current); changedIds = [current.id]; }
+    } else {
+      lastStamp = st;
+      const ck = "data/cleared.json";
+      if (st[ck] && st[ck] !== seen[ck]) { await loadHidden(st[ck]); changedIds.push("*hidden*"); }
+      const changed = TABS.filter(t => { const k = keyOf(t.src); return st[k] && st[k] !== seen[k]; });
+      await Promise.all(changed.map(t => fetchTab(t, st[keyOf(t.src)])));
+      changedIds = changedIds.concat(changed.map(t => t.id));
+    }
+    if (!changedIds.length) return;
+    // The tab on screen counts as seen (clears its own dot), as before.
+    if (current.kind === "tg" && cache[current.id]) {
+      lsAdd("amzKnown_"+current.id, urlsOf(current.id));
+      NEW[current.id] = false;
+    }
+    recomputeDots();
+    render();
+  } finally { polling = false; }
 }
 
 function buildTabs(){
@@ -3256,9 +3310,11 @@ document.getElementById("themeBtn").addEventListener("click", () => {
 });
 applyTheme();
 buildTabs();
-(async () => { await loadHidden(); await loadTab(current); })();
-refreshDots();
-setInterval(async () => { await loadHidden(); if (current.kind === "tg") loadTab(current); refreshDots(); }, 30000);
+poll(true);
+setInterval(() => poll(false), POLL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - lastPoll > POLL_MS) poll(false);
+});
 </script>
 </body>
 </html>"""

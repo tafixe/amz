@@ -180,6 +180,23 @@ export default {
       });
     }
 
+    // GET /api/stamp — {"data/x.json": "<etag>", ...} for every data file.
+    // The dashboard polls this ONE cheap request and downloads only the feeds
+    // whose etag changed. Every request here counts against the account-wide
+    // Cloudflare free cap (100k Worker requests/day, shared with
+    // ofertasninja.com); fetching all ~30 feeds every 30 s blew it on
+    // 2026-10-28 (116k requests in 24 h from two open dashboards).
+    if (request.method === "GET" && url.pathname === "/api/stamp") {
+      const out = {};
+      let cursor;
+      do {
+        const page = await env.BUCKET.list({ prefix: "data/", cursor });
+        for (const o of page.objects) if (o.key.endsWith(".json")) out[o.key] = o.etag;
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor);
+      return Response.json(out, { headers: { ...cors, "Cache-Control": "no-store" } });
+    }
+
     // Hidden-on-open, PER PUBLICATION: {url: date of the row when hidden}.
     // The scraper drops a row only while its date is not newer than that
     // stamp, so a re-publish by the source (newer date, e.g. a price drop)
@@ -254,7 +271,14 @@ export default {
     const headers = new Headers(cors);
     headers.set("Content-Type", obj.httpMetadata?.contentType || MIME[ext] || "application/octet-stream");
     headers.set("Content-Length", obj.size);
-    headers.set("Cache-Control", key.endsWith(".html") ? "no-cache, no-store, must-revalidate" : "public, max-age=60");
+    // "?v=<etag>" names one immutable version of a data file (see /api/stamp):
+    // the browser keeps it, so switching tabs or reloading the page re-uses it
+    // without another request. Private: the data sits behind the login cookie.
+    const versioned = url.searchParams.has("v") && key.startsWith("data/");
+    headers.set("Cache-Control",
+      key.endsWith(".html") ? "no-cache, no-store, must-revalidate"
+      : versioned ? "private, max-age=31536000, immutable"
+      : "private, max-age=60");
 
     if (request.method === "HEAD") return new Response(null, { headers });
     return new Response(obj.body, { headers });
