@@ -557,6 +557,26 @@ def resolve_to_worten(u: str, mentions_worten: bool = False) -> str:
 # Non-Amazon rows a provider queues for its OWN tab (state_key -> [row dicts]);
 # drained by scan_amazon_list and shown with a store badge. Reset per run.
 _EXTRA_ROWS: dict = {}
+_CUR_TAB: list = [None]   # state_key whose provider is running (its store links join that tab too)
+_SHOP_NAMES = {"aliexpress": "AliExpress", "pcc": "PCComponentes", "pccomponentes": "PCComponentes",
+               "worten": "Worten"}
+
+
+def tab_other(shop: str, url: str, date: str = "", coupon: str = "", name: str = ""):
+    """Queue a non-Amazon deal for the tab whose provider is running, badged
+    with its store, so every list shows every store its source publishes."""
+    key = _CUR_TAB[0]
+    if not key or not url:
+        return
+    shop = _SHOP_NAMES.get(shop.lower(), shop[:1].upper() + shop[1:] if shop else "Outra loja")
+    row = {"url": url, "date": date or "", "shop": shop, "name": name or "Produto " + shop}
+    if coupon:
+        row["coupon"] = coupon
+    if shop == "Worten":
+        row["wt"] = 1
+    rows = _EXTRA_ROWS.setdefault(key, [])
+    if not any(r["url"] == url for r in rows):
+        rows.append(row)
 _STORE_PATTERNS = (
     ("aliexpress", re.compile(r"https?://(?:s\.click\.|[a-z]{2}\.|www\.)?aliexpress\.[a-z.]{2,6}/[^\s\"'<>\\]+", re.I)),
     ("pcc", re.compile(r"https?://(?:www\.)?pccomponentes\.(?:com|pt)/[^\s\"'<>\\]+", re.I)),
@@ -585,6 +605,7 @@ def _store_slug_name(url: str) -> str:
 def store_add(store: str, url: str, date: str = "", coupon: str = "", name: str = ""):
     _STORE_ITEMS[store].append({"url": url, "date": date or "",
                                 "coupon": coupon or "", "name": name or ""})
+    tab_other(store, url, date, coupon, name)
 
 
 def store_scan_text(text: str, date: str = "", name: str = ""):
@@ -885,6 +906,8 @@ def get_xaxu_items() -> list:
                 store_add("pcc", url, date, coupon, title)
                 continue
             if store != "amazon":
+                if store:
+                    tab_other(store.split(".")[0], url, date, coupon, title)
                 continue
             cost = (re.search(r'class="cost">([^<]+)<', c) or [None, ""])[1].strip()
             offr = (re.search(r'class="offr">([^<]+)<', c) or [None, ""])[1].strip()
@@ -981,6 +1004,13 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
                           _clean_name(t.get("title", "")))
                 continue
             if merchant != "amazon.es":
+                if merchant:
+                    ts0 = t.get("publishedAt")
+                    tab_other(re.sub(r"^(www|es)\.", "", merchant).split(".")[0],
+                              f"{base}/ofertas/{t.get('titleSlug', 'x')}-{tid}",
+                              datetime.fromtimestamp(int(ts0), timezone.utc).isoformat() if ts0 else "",
+                              extract_coupon_code("cupón " + (t.get("voucherCode") or "")),
+                              _clean_name(t.get("title", "")))
                 continue
             if tid not in threads:
                 threads[tid] = t
@@ -1641,7 +1671,11 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
                               _clean_name(r.get("name", "")))
                 continue
             if not any(s.get("slug") == "amazon-es" or "amazon" in (s.get("name", "").lower()) for s in stores):
-                continue   # Amazon.es only
+                # Any other store: the offer link opens it (badged with the store name).
+                sname = next((s.get("name") for s in stores if s.get("name")), "")
+                tab_other(sname or "Outra loja", ou, r.get("created_at") or "", _coupon(r),
+                          _clean_name(r.get("name", "")))
+                continue
             final = mmap.get(ou)
             if final is None:
                 if resolved >= 60:
@@ -2480,7 +2514,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Generic shorteners (t.ly, bit.ly, ...) are resolved ONCE (cached per tab);
     # challenge-walled ones keep the short link and take the store name from
     # the post text instead.
-    show_all = state_key in ("data/nas.json", "data/descontos.json")
+    show_all = True
     scache = existing.get("scache", {})   # shortener url -> final url ("" = unresolvable)
     _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp|facebook|instagram", re.I)
     # tidd.ly is Awin's shortener: resolving it once reveals the real store
@@ -2592,6 +2626,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     raw_to_low: dict[str, bool] = {}
     raw_to_name: dict[str, str] = {}   # name supplied by the source (for /dp/ASIN links)
     if items_fn:
+        _CUR_TAB[0] = state_key
         try:
             for item in items_fn():
                 raw, date, coupon = item[0], item[1], item[2]
@@ -2609,6 +2644,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                         raw_to_name[raw] = iname
         except Exception as e:
             log.error("items provider failed for %s: %s", state_key, e)
+        _CUR_TAB[0] = None
 
     log.info("[%s] latest batch: %d unique raw Amazon URLs (%d with coupon code)",
              state_key, len(candidates), len(raw_to_coupon))
@@ -2734,7 +2770,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Non-Amazon rows the provider queued for this tab (badged by store).
     extra = _EXTRA_ROWS.pop(state_key, [])
     for r in extra:
-        if _hidden(cleared, r["url"], r.get("date") or now_iso) or any(l["url"] == r["url"] for l in links):
+        if not r.get("date"):                   # no source date: first-seen
+            r["date"] = seen.get(r["url"]) or now_iso
+            seen[r["url"]] = r["date"]
+        if _hidden(cleared, r["url"], r["date"]) or any(l["url"] == r["url"] for l in links):
             continue
         if banned is not None and r["url"] in banned and r.get("shop") != "Worten":
             if not _dt_after(r.get("date", ""), _ban_until(banned[r["url"]])):
@@ -3137,7 +3176,6 @@ async function loadTab(tab){
 
 // DOS view is Amazon-only: other stores (AliExpress, PCComponentes, Worten,
 // coupon offers, ...) stay in the normal tabbed view.
-function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
 function asinOf(u){ const m = /:\/\/www\.amazon\.[^/]+\/(?:.*\/)?dp\/([A-Z0-9]{10})/.exec(u || ""); return m ? m[1] : ""; }
 // Real-time ordering: parse dates (mixed formats) — newest first everywhere.
 function dateMs(l){ const t = Date.parse(l.date || ""); return isNaN(t) ? 0 : t; }
@@ -3148,8 +3186,7 @@ function visibleItems(){
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
-        if (!isAmazon(l)) continue;
-        if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
+        if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;   // every store, not only Amazon
         const p = best.get(l.url);
         if (!p) { best.set(l.url, Object.assign({}, l, { coupons: l.coupon ? [l.coupon] : [] })); continue; }
         // Same product in several tabs: one row that gathers what each copy knows
@@ -3169,7 +3206,6 @@ function visibleItems(){
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
-        if (dosMode && !isAmazon(l)) continue;           // DOS search: Amazon only too
         if ((t.kind === "tg" ? isHidden(l) : th.has(l.url)) || seenUrl.has(l.url)) continue;
         if (!(l.name||"").toLowerCase().includes(q)) continue;
         seenUrl.add(l.url);
