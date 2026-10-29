@@ -2765,7 +2765,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             r.pop("coupon", None)
         links.append(r)
     if wt_rows:
-        log.info("[%s] +%d worten rows", state_key, len(wt_rows))
+        log.info("[%s] +%d worten/other-store rows (channel posts)", state_key, len(wt_rows))
 
     # Non-Amazon rows the provider queued for this tab (badged by store).
     extra = _EXTRA_ROWS.pop(state_key, [])
