@@ -1389,6 +1389,43 @@ def reference_recent_asins(sess, hours: int = REFERENCE_WINDOW_HOURS) -> tuple:
     return recent, wturls
 
 
+DEZ_PAGES = int(os.environ.get("DEZ_PAGES", "4"))
+
+
+def _dez_page_promos(sess, base: str) -> list:
+    """The site's promotions listing (Next.js): each page embeds its deals in
+    the React Server Components payload. Decode them and map the new field
+    names onto the old API's (coupon, promoLink, updatedAt/promoDay)."""
+    promos: dict = {}
+    for page in range(1, DEZ_PAGES + 1):
+        try:
+            h = sess.get(f"{base}/promocoes" + (f"?page={page}" if page > 1 else ""), timeout=40).text
+        except requests.RequestException as e:
+            log.warning("dez page %d: %s", page, e)
+            break
+        chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', h, re.S)
+        try:
+            rsc = "".join(json.loads('"' + c + '"') for c in chunks)
+        except ValueError:
+            continue
+        found = 0
+        for m in re.finditer(r'\{"id":\d+,"discountId":', rsc):
+            try:
+                o, _ = json.JSONDecoder().raw_decode(rsc[m.start():])
+            except ValueError:
+                continue
+            found += 1
+            d = lambda k: re.sub(r"^\$D", "", o.get(k) or "")
+            promos[o["id"]] = {"title": o.get("title", ""), "store": o.get("store", ""),
+                               "productId": o.get("productId", "") if o.get("productIdKind") == "ASIN" else "",
+                               "currentPrice": o.get("currentPrice"), "coupon": o.get("couponCode") or "",
+                               "promoLink": o.get("affiliateLink") or "",
+                               "updatedAt": d("createdAt"), "promoDay": d("updatedAt")}
+        if not found:
+            break
+    return list(promos.values())
+
+
 def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     """Source mirrors the reference source. Read its deals API (the ASIN
     is in productId) and keep only the ones whose ASIN was NOT published on
@@ -1398,18 +1435,24 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
     sess.headers.update(_BROWSER_HEADERS)
 
     dez_api = SOURCES.get("dez_api", "")
-    if not dez_api:
+    dez_url = os.environ.get("DEZ_URL", "").rstrip("/")
+    if not dez_api and not dez_url:
         return out
 
     if cupo_recent is None:
         cupo_recent = reference_recent_asins(sess, hours=REFERENCE_WINDOW_HOURS)[0]   # ASINs to exclude
 
     # Source promotions (productId is the ASIN).
-    try:
-        promos = sess.get(dez_api, timeout=40).json().get("data", [])
-    except (requests.RequestException, ValueError) as e:
-        log.error("dez: %s", e)
-        return out
+    # The old JSON API is gone since the site's redesign; the listing pages
+    # carry the same data. The API is still tried first while configured.
+    promos = []
+    if dez_api and not dez_url:
+        try:
+            promos = sess.get(dez_api, timeout=40).json().get("data", [])
+        except (requests.RequestException, ValueError) as e:
+            log.error("dez: %s", e)
+    if dez_url:
+        promos = _dez_page_promos(sess, dez_url)
     # Publication date = the last time the promo's PRICE changed (or first
     # sight), persisted per promo. The source's updatedAt is touched on every
     # re-check, which would un-hide opened deals every few minutes; a real
