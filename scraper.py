@@ -1122,8 +1122,11 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
                             "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, ""),
                             "rank": rank, "i": img, "kx": _keepa_extras(p)}
             done += 1
-    log.info("keepa low: refreshed %d asins, %d now at all-time low",
-             done, sum(1 for v in low_cache.values() if v.get("low")))
+    kxs = [v.get("kx") or {} for v in low_cache.values()]
+    log.info("keepa low: refreshed %d asins, %d now at all-time low (sales tags: %d top, %d sold/month, %d rising)",
+             done, sum(1 for v in low_cache.values() if v.get("low")),
+             sum(1 for k in kxs if k.get("top")), sum(1 for k in kxs if k.get("ms")),
+             sum(1 for k in kxs if k.get("tr")))
     return done
 
 
