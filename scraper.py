@@ -561,6 +561,19 @@ _CUR_TAB: list = [None]   # state_key whose provider is running (its store links
 # The only tabs that also list other stores' deals; every other tab stays Amazon-only.
 OTHER_STORE_TABS = {"data/amazon_links.json", "data/descontos.json", "data/dez.json",
                     "data/nas.json", "data/dib.json"}
+# ...except these stores (and anything reached through an Awin link), which every
+# tab shows, each with its own coloured dot.
+FEATURED_SHOPS = {"Worten", "AliExpress", "PCComponentes", "Prozis"}
+_AWIN_HOSTS = ("tidd.ly", "awin1.com")
+
+
+def _is_awin(url: str) -> bool:
+    host = re.sub(r"^www\.", "", urlparse(url).netloc.lower())
+    return any(host == h or host.endswith("." + h) for h in _AWIN_HOSTS)
+
+
+def _featured_row(r: dict) -> bool:
+    return bool(r.get("wt") or r.get("aw") or r.get("shop") in FEATURED_SHOPS)
 _SHOP_NAMES = {"aliexpress": "AliExpress", "pcc": "PCComponentes", "pccomponentes": "PCComponentes",
                "worten": "Worten"}
 
@@ -569,10 +582,16 @@ def tab_other(shop: str, url: str, date: str = "", coupon: str = "", name: str =
     """Queue a non-Amazon deal for the tab whose provider is running, badged
     with its store, so every list shows every store its source publishes."""
     key = _CUR_TAB[0]
-    if key not in OTHER_STORE_TABS or not url:
+    if not key or not url:
         return
     shop = _SHOP_NAMES.get(shop.lower(), shop[:1].upper() + shop[1:] if shop else "Outra loja")
+    if shop.lower() == "prozis":
+        shop = "Prozis"
     row = {"url": url, "date": date or "", "shop": shop, "name": name or "Produto " + shop}
+    if _is_awin(url):
+        row["aw"] = 1
+    if key not in OTHER_STORE_TABS and not _featured_row(row):
+        return
     if coupon:
         row["coupon"] = coupon
     if shop == "Worten":
@@ -2554,9 +2573,16 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             u2 = html.unescape(u)
             if AMAZON_HOST_RE.search(u2) or CUSTOM_ASIN_RE.search(u2) or _OTHER_SKIP.search(u2):
                 continue
+            aw = 1 if _is_awin(u2) else 0
+            if "awin1.com" in u2:                 # Awin deep link: target in ?ued=
+                ued = (parse_qs(urlparse(u2).query).get("ued") or [""])[0]
+                if ued.startswith("http"):
+                    u2 = unquote(ued)
             u2 = re.sub(r"[?#].*$", "", u2).rstrip(").,;/")
             host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
             shop = ""
+            if host in _GENERIC_SHORT and not show_all and host not in _AWIN_HOSTS:
+                continue                          # Amazon-only tab: open Awin links only
             if host in _GENERIC_SHORT:
                 final = scache.get(u2)
                 if final is None:                 # never tried: open it ONCE
@@ -2582,9 +2608,14 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                 continue
             wt_seen.add(u2)
             shop = shop or _shop_label(host)
-            wt_rows.append({"url": u2, "date": date, "shop": shop,
-                            "name": name or "Produto " + shop,
-                            "coupon": extract_coupon_code(h)})
+            row = {"url": u2, "date": date, "shop": shop,
+                   "name": name or "Produto " + shop, "coupon": extract_coupon_code(h)}
+            if aw:
+                row["aw"] = 1
+            if shop == "Worten":
+                row["wt"] = 1
+            if show_all or _featured_row(row):
+                wt_rows.append(row)
         return found_amz
 
     posts: list[tuple[datetime | None, list[str]]] = []
@@ -2594,8 +2625,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             # Tracked non-Amazon stores go to their own transversal tabs.
             store_scan_text(post["html"], dt_iso, _post_text_name(post["html"]))
             _wt_collect(post["html"], dt_iso, _post_text_name(post["html"]))
-            extra_amz = (_other_collect(post["html"], dt_iso, _post_text_name(post["html"]))
-                         if show_all else [])
+            extra_amz = _other_collect(post["html"], dt_iso, _post_text_name(post["html"]))
             urls = extract_amazon_urls(post["html"])
             urls += [u for u in extra_amz if u not in urls]
             if urls:
@@ -2758,7 +2788,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Worten / other-store rows join this tab's list (marked; no ASIN so Keepa
     # skips them) only on the tabs that follow other stores.
     if state_key not in OTHER_STORE_TABS:
-        wt_rows = []
+        wt_rows = [r for r in wt_rows if _featured_row(r)]
     for r in wt_rows:
         if _hidden(cleared, r["url"], r["date"] or seen.get(r["url"]) or now_iso):
             continue
@@ -2783,7 +2813,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         log.info("[%s] +%d worten/other-store rows (channel posts)", state_key, len(wt_rows))
 
     # Non-Amazon rows the provider queued for this tab (badged by store).
-    extra = _EXTRA_ROWS.pop(state_key, []) if state_key in OTHER_STORE_TABS else []
+    extra = [r for r in _EXTRA_ROWS.pop(state_key, [])
+             if state_key in OTHER_STORE_TABS or _featured_row(r)]
     for r in extra:
         if not r.get("date"):                   # no source date: first-seen
             r["date"] = seen.get(r["url"]) or now_iso
@@ -2993,6 +3024,10 @@ def generate_amazon_html() -> str:
   .wt-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     background:#e11d2e; margin-right:7px; vertical-align:middle; flex-shrink:0;
     box-shadow:0 0 6px rgba(225,29,46,.7); }
+  .wt-dot.sd-ali { background:#f97316; box-shadow:0 0 6px rgba(249,115,22,.7); }
+  .wt-dot.sd-pcc { background:#3b82f6; box-shadow:0 0 6px rgba(59,130,246,.7); }
+  .wt-dot.sd-prz { background:#a855f7; box-shadow:0 0 6px rgba(168,85,247,.7); }
+  .wt-dot.sd-aw  { background:#14b8a6; box-shadow:0 0 6px rgba(20,184,166,.7); }
   li a.visited { background:rgba(37,211,102,0.10); }
   li a.visited .name { color:var(--green); }
   li a.visited .arrow { color:var(--green); }
@@ -3113,7 +3148,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, shop:l.shop||"", kx:l.kx||null }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -3205,6 +3240,12 @@ function asinOf(u){ const m = /:\/\/www\.amazon\.[^/]+\/(?:.*\/)?dp\/([A-Z0-9]{1
 // Real-time ordering: parse dates (mixed formats) — newest first everywhere.
 function dateMs(l){ const t = Date.parse(l.date || ""); return isNaN(t) ? 0 : t; }
 const byNewest = (a, b) => dateMs(b) - dateMs(a);
+// Featured stores (shown on every tab): one dot colour each; Awin = any other store via Awin.
+const SHOP_DOTS = { "Worten":"sd-wt", "AliExpress":"sd-ali", "PCComponentes":"sd-pcc", "Prozis":"sd-prz" };
+function shopDot(l){
+  if (l.wt || l.shop === "Worten") return "sd-wt";
+  return SHOP_DOTS[l.shop] || (l.aw ? "sd-aw" : "");
+}
 function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
 function visibleItems(){
   if (dosMode && !query) {   // one merged list: most-shared first, then newest
@@ -3212,7 +3253,7 @@ function visibleItems(){
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
-        if (!t.others && !isAmazon(l)) continue;   // other stores only from the tabs that follow them
+        if (!t.others && !isAmazon(l) && !shopDot(l)) continue;   // other stores: featured ones everywhere, the rest only from the tabs that follow them
         if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
         const p = best.get(l.url);
         if (!p) { best.set(l.url, Object.assign({}, l, { coupons: l.coupon ? [l.coupon] : [] })); continue; }
@@ -3279,7 +3320,7 @@ function render(){
   box.innerHTML = slice.map(l => {
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
     const dot = (l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '') +
-      ((l.wt || l.shop === "Worten") ? '<span class="wt-dot" title="Worten"></span>' : '');
+      (shopDot(l) ? '<span class="wt-dot '+shopDot(l)+'" title="'+esc(l.shop || 'Worten')+(l.aw ? ' (Awin)' : '')+'"></span>' : '');
     // All-time-low rows show the historical min price AND the publish time.
     const tag = ((l.low && l.minp)
       ? '<span class="tag disc" title="'+esc(dotTitle)+'">mín '+l.minp+'€</span>' : '') +
