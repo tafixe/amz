@@ -1710,9 +1710,9 @@ def get_terapia_items() -> list[tuple[str, str, str, bool, str]]:
 
 
 def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
-    """Server-rendered deals site (Next.js). Each card on the homepage has a
-    direct Amazon /dp/ASIN link, the product name in the image alt, and a
-    /deal/<ms> id that is the publish timestamp. Returns
+    """Deals site (Next.js). The homepage no longer renders the cards as HTML:
+    the deals list travels in the React Server Components payload, one object
+    per deal with its Amazon url, title and createdAt. Returns
     (amazon_url, iso_date, coupon, low, name) tuples."""
     out: list[tuple[str, str, str, bool, str]] = []
     seen = set()
@@ -1727,19 +1727,28 @@ def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
         log.error("dib: %s", e)
         return out
     store_scan_text(h)   # transversal AliExpress/PCC collector
-    for m in re.finditer(r'href="https?://www\.amazon\.[a-z.]+/dp/([A-Z0-9]{10})[^"]*"', h):
-        a = m.group(1)
-        if a in seen:
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', h, re.S)
+    try:
+        rsc = "".join(json.loads('"' + c + '"') for c in chunks)
+    except ValueError:
+        rsc = ""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r'\{"id":\d{13},"title":', rsc):
+        try:
+            o, _ = dec.raw_decode(rsc, m.start())
+        except ValueError:
             continue
-        seen.add(a)
-        card = h[max(0, m.start() - 1700):m.start()]
-        alts = re.findall(r'alt="([^"]+)"', card)
-        name = _clean_name(html.unescape(alts[-1])) if alts else ""
-        dm = re.findall(r"/deal/(\d{13})", card)
-        date = (datetime.fromtimestamp(int(dm[-1]) / 1000, timezone.utc).isoformat()
-                if dm else "")
-        coupon = extract_coupon_code(re.sub(r"<[^>]+>", " ", card))
-        out.append((f"https://www.amazon.es/dp/{a}", date, coupon, False, name))
+        am = re.search(r"amazon\.[a-z.]+/dp/([A-Z0-9]{10})", o.get("url") or "")
+        if not am or o.get("expired") is True or am.group(1) in seen:
+            continue
+        seen.add(am.group(1))
+        txt = lambda k: o.get(k) if isinstance(o.get(k), str) and o.get(k) != "$undefined" else ""
+        date = txt("createdAt")
+        if not date and o.get("id"):
+            date = datetime.fromtimestamp(int(o["id"]) / 1000, timezone.utc).isoformat()
+        coupon = extract_coupon_code(" ".join(txt(k) for k in ("title", "description", "promoType")))
+        out.append((f"https://www.amazon.es/dp/{am.group(1)}", date, coupon, False,
+                    _clean_name(txt("shortTitle") or txt("title"))))
     log.info("dib: %d amazon.es deals", len(out))
     return out
 
