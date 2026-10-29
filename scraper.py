@@ -558,6 +558,9 @@ def resolve_to_worten(u: str, mentions_worten: bool = False) -> str:
 # drained by scan_amazon_list and shown with a store badge. Reset per run.
 _EXTRA_ROWS: dict = {}
 _CUR_TAB: list = [None]   # state_key whose provider is running (its store links join that tab too)
+# The only tabs that also list other stores' deals; every other tab stays Amazon-only.
+OTHER_STORE_TABS = {"data/amazon_links.json", "data/descontos.json", "data/dez.json",
+                    "data/nas.json", "data/dib.json"}
 _SHOP_NAMES = {"aliexpress": "AliExpress", "pcc": "PCComponentes", "pccomponentes": "PCComponentes",
                "worten": "Worten"}
 
@@ -566,7 +569,7 @@ def tab_other(shop: str, url: str, date: str = "", coupon: str = "", name: str =
     """Queue a non-Amazon deal for the tab whose provider is running, badged
     with its store, so every list shows every store its source publishes."""
     key = _CUR_TAB[0]
-    if not key or not url:
+    if key not in OTHER_STORE_TABS or not url:
         return
     shop = _SHOP_NAMES.get(shop.lower(), shop[:1].upper() + shop[1:] if shop else "Outra loja")
     row = {"url": url, "date": date or "", "shop": shop, "name": name or "Produto " + shop}
@@ -1814,10 +1817,19 @@ def get_dib_items() -> list[tuple[str, str, str, bool, str]]:
         except ValueError:
             continue
         am = re.search(r"amazon\.[a-z.]+/dp/([A-Z0-9]{10})", o.get("url") or "")
-        if not am or o.get("expired") is True or am.group(1) in seen:
+        if o.get("expired") is True:
+            continue
+        txt = lambda k: o.get(k) if isinstance(o.get(k), str) and o.get(k) != "$undefined" else ""
+        if not am:   # another store's deal: badged row in this tab
+            if txt("url") and txt("url") not in seen:
+                seen.add(txt("url"))
+                tab_other(txt("store") or "Outra loja", txt("url"), txt("createdAt"),
+                          extract_coupon_code(" ".join(txt(k) for k in ("title", "description", "promoType"))),
+                          _clean_name(txt("shortTitle") or txt("title")))
+            continue
+        if am.group(1) in seen:
             continue
         seen.add(am.group(1))
-        txt = lambda k: o.get(k) if isinstance(o.get(k), str) and o.get(k) != "$undefined" else ""
         date = txt("createdAt")
         if not date and o.get("id"):
             date = datetime.fromtimestamp(int(o["id"]) / 1000, timezone.utc).isoformat()
@@ -2514,7 +2526,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # Generic shorteners (t.ly, bit.ly, ...) are resolved ONCE (cached per tab);
     # challenge-walled ones keep the short link and take the store name from
     # the post text instead.
-    show_all = True
+    show_all = state_key in OTHER_STORE_TABS
     scache = existing.get("scache", {})   # shortener url -> final url ("" = unresolvable)
     _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp|facebook|instagram", re.I)
     # tidd.ly is Awin's shortener: resolving it once reveals the real store
@@ -2743,7 +2755,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             link["low"] = True   # provider already says it's an all-time low
         links.append(link)
 
-    # Worten rows join this tab's list (marked; no ASIN so Keepa skips them).
+    # Worten / other-store rows join this tab's list (marked; no ASIN so Keepa
+    # skips them) only on the tabs that follow other stores.
+    if state_key not in OTHER_STORE_TABS:
+        wt_rows = []
     for r in wt_rows:
         if _hidden(cleared, r["url"], r["date"] or seen.get(r["url"]) or now_iso):
             continue
@@ -2768,7 +2783,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         log.info("[%s] +%d worten/other-store rows (channel posts)", state_key, len(wt_rows))
 
     # Non-Amazon rows the provider queued for this tab (badged by store).
-    extra = _EXTRA_ROWS.pop(state_key, [])
+    extra = _EXTRA_ROWS.pop(state_key, []) if state_key in OTHER_STORE_TABS else []
     for r in extra:
         if not r.get("date"):                   # no source date: first-seen
             r["date"] = seen.get(r["url"]) or now_iso
@@ -2926,7 +2941,16 @@ def generate_amazon_html() -> str:
     border-bottom:1px solid var(--border); color:var(--text); text-decoration:none;
     background:var(--row); font-size:14px; line-height:1.3; }
   li a:active, li a:hover { background:var(--row-hover); }
-  li .name { flex:1; word-break:break-word; }
+  li .name { flex:1 1 0; min-width:45%; word-break:break-word; }
+  /* Badges wrap among themselves (right-aligned) instead of squeezing the name. */
+  li .tags { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center;
+             row-gap:4px; flex:0 1 auto; max-width:50%; }
+  li .tags > * { margin-top:0; }
+  @media (max-width: 640px) {
+    li a { flex-wrap:wrap; }
+    li .name { flex:1 1 calc(100% - 60px); min-width:0; }
+    li .tags { max-width:none; flex:1 1 0; min-width:0; justify-content:flex-start; padding-left:48px; }
+  }
   li .tag { color:var(--muted); font-size:11px; flex-shrink:0; white-space:nowrap; }
   li .tag.disc { color:var(--brand); font-weight:700; }
   li .tag.kx { margin-left:6px; border:1px solid var(--border); border-radius:6px; padding:1px 6px; }
@@ -2960,6 +2984,7 @@ def generate_amazon_html() -> str:
   ul.compact .name { flex:1 1 100%; overflow:hidden; display:-webkit-box;
     -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   ul.compact .cpn { margin-left:0; }
+  ul.compact .tags { max-width:none; justify-content:flex-start; }
   ul.compact .arrow { display:none; }
   li .arrow { color:var(--brand); font-size:13px; font-weight:700; flex-shrink:0; }
   .low-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
@@ -3024,18 +3049,18 @@ def generate_amazon_html() -> str:
 <button class="more" id="moreBtn" style="display:none">Mostrar mais</button>
 <script>
 const TABS = [
-  { id:"tg",   label:"Telegram",     src:"/data/amazon_links.json", kind:"tg" },
-  { id:"desc", label:"Descontos",    src:"/data/descontos.json",    kind:"tg" },
+  { id:"tg",   label:"Telegram",     src:"/data/amazon_links.json", kind:"tg", others:true },
+  { id:"desc", label:"Descontos",    src:"/data/descontos.json",    kind:"tg", others:true },
   { id:"deluxe", label:"Deluxe",     src:"/data/deluxe.json",       kind:"tg" },
   { id:"chollo", label:"Chollo",     src:"/data/chollo.json",       kind:"tg" },
-  { id:"dez",    label:"DEZ",        src:"/data/dez.json",          kind:"tg" },
-  { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg" },
+  { id:"dez",    label:"DEZ",        src:"/data/dez.json",          kind:"tg", others:true },
+  { id:"nas",    label:"NAS",        src:"/data/nas.json",          kind:"tg", others:true },
   { id:"mi",     label:"Mi",         src:"/data/mi.json",           kind:"tg" },
   { id:"cholloes", label:"cholloes", src:"/data/cholloes.json",     kind:"tg" },
   { id:"camel",  label:"Camel",      src:"/data/camel.json",        kind:"tg" },
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
-  { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg" },
+  { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg", others:true },
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
   { id:"jp",     label:"JP",         src:"/data/jp.json",           kind:"tg" },
   { id:"xaxu",   label:"xaxu",       src:"/data/xaxu.json",         kind:"tg" },
@@ -3180,13 +3205,15 @@ function asinOf(u){ const m = /:\/\/www\.amazon\.[^/]+\/(?:.*\/)?dp\/([A-Z0-9]{1
 // Real-time ordering: parse dates (mixed formats) — newest first everywhere.
 function dateMs(l){ const t = Date.parse(l.date || ""); return isNaN(t) ? 0 : t; }
 const byNewest = (a, b) => dateMs(b) - dateMs(a);
+function isAmazon(l){ return l.url.indexOf("://www.amazon.") > 0 && l.url.indexOf("/dp/") > 0; }
 function visibleItems(){
   if (dosMode && !query) {   // one merged list: most-shared first, then newest
     const best = new Map();
     for (const t of TABS) {
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
-        if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;   // every store, not only Amazon
+        if (!t.others && !isAmazon(l)) continue;   // other stores only from the tabs that follow them
+        if (t.kind === "tg" ? isHidden(l) : th.has(l.url)) continue;
         const p = best.get(l.url);
         if (!p) { best.set(l.url, Object.assign({}, l, { coupons: l.coupon ? [l.coupon] : [] })); continue; }
         // Same product in several tabs: one row that gathers what each copy knows
@@ -3293,7 +3320,8 @@ function render(){
     const shopName = l.shop || (l.wt ? 'Worten' : '');
     const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'" data-date="'+esc(l.date||"")+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+ wbadge + cpn + kxt + val + src + tag +
+      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+
+      ((wbadge + cpn + kxt + val + src) ? '<span class="tags">'+wbadge + cpn + kxt + val + src+'</span>' : '') + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
       const s = l.store || "Outras";
