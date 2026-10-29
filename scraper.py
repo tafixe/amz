@@ -1040,6 +1040,13 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
 # spikes that gave false 'not at min'. stats.current is -1 for an ended Lightning,
 # so it never counts a stale flash price as the current price.
 KEEPA_PRICE_SERIES = (0, 8, 18, 33)
+# Sales signals: 'bought in past month' floor, top-N rank in a subcategory /
+# the root category, and 'rising' = current rank at most half its 30-day average.
+KEEPA_SOLD_MIN = int(os.environ.get("KEEPA_SOLD_MIN", "500"))
+KEEPA_TOP_SUB = int(os.environ.get("KEEPA_TOP_SUB", "20"))
+KEEPA_TOP_ROOT = int(os.environ.get("KEEPA_TOP_ROOT", "200"))
+KEEPA_TREND_RATIO = 0.5
+KEEPA_TREND_MAX_RANK = 30000
 KEEPA_TYPE_NAMES = {0: "Amazon", 8: "Oferta-relâmpago", 18: "Buy Box", 33: "Prime exclusive"}
 
 
@@ -1142,7 +1149,38 @@ def _keepa_extras(p: dict) -> dict:
         if isinstance(pr, dict) and pr.get("type") == "SNS" and pr.get("discountPercent"):
             kx["sn"] = pr["discountPercent"]
             break
+    kx.update(_keepa_sales(p))
     return kx
+
+
+def _keepa_sales(p: dict) -> dict:
+    """How well the product sells, from the same response: Amazon's 'bought in
+    past month' (ms), the best rank in one of its categories (top = [rank, name]),
+    and a rising flag (tr) when the current rank is well above its 30-day average."""
+    out = {}
+    ms = p.get("monthlySold")
+    if isinstance(ms, int) and ms >= KEEPA_SOLD_MIN:
+        out["ms"] = ms
+    names = {c.get("catId"): c.get("name") for c in (p.get("categoryTree") or []) if isinstance(c, dict)}
+    root = p.get("salesRankReference")
+    best = None
+    for cat, hist in (p.get("salesRanks") or {}).items():
+        try:
+            cat = int(cat)
+        except ValueError:
+            continue
+        r = hist[-1] if isinstance(hist, list) and hist and isinstance(hist[-1], int) else -1
+        limit = KEEPA_TOP_ROOT if cat == root else KEEPA_TOP_SUB
+        if 0 < r <= limit and (best is None or r < best[0]):
+            best = [r, names.get(cat, "")]
+    if best:
+        out["top"] = best
+    st = p.get("stats") or {}
+    cur, avg = (st.get("current") or [])[3:4], (st.get("avg30") or [])[3:4]
+    if (cur and avg and isinstance(cur[0], int) and isinstance(avg[0], int) and 0 < cur[0] <= KEEPA_TREND_MAX_RANK
+            and avg[0] > 0 and cur[0] <= avg[0] * KEEPA_TREND_RATIO):
+        out["tr"] = 1
+    return out
 
 
 def keepa_titles(asins: list) -> tuple:
@@ -2853,6 +2891,7 @@ def generate_amazon_html() -> str:
   li .tag.kx.cp { border-color:#16a34a; color:#22c55e; font-weight:700; }
   li .tag.kx.prime { border-color:#1d9bf0; color:#38bdf8; font-weight:700; }
   li .tag.kx.sn { opacity:.7; }
+  li .tag.kx.hot { border-color:#ea580c; color:#fb923c; font-weight:700; }
   li .cpn { flex-shrink:0; margin-left:8px; border:1px solid var(--brand); color:var(--brand);
     background:transparent; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700;
     cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; }
@@ -3187,7 +3226,10 @@ function render(){
       (!k.pr && k.db ? '<span class="tag kx" title="'+esc(k.db)+'">⚡ '+esc(k.db)+'</span>' : '') +
       (k.cp ? '<span class="tag kx cp" title="Cupão Amazon (marcar na página)">cupão '+kv(k.cp)+'</span>' : '') +
       (k.sc ? '<span class="tag kx" title="Cupão Subscreve e Poupa">S&amp;P '+kv(k.sc)+'</span>' : '') +
-      (k.sn && !k.sc ? '<span class="tag kx sn" title="Subscreve e Poupa">S&amp;P -'+k.sn+'%</span>' : '');
+      (k.sn && !k.sc ? '<span class="tag kx sn" title="Subscreve e Poupa">S&amp;P -'+k.sn+'%</span>' : '') +
+      (k.top ? '<span class="tag kx hot" title="Top vendas'+(k.top[1] ? ' em '+esc(k.top[1]) : '')+' na Amazon">🏆 #'+k.top[0]+(k.top[1] ? ' '+esc(k.top[1]) : '')+'</span>' : '') +
+      (k.ms ? '<span class="tag kx hot" title="Comprados no último mês (Amazon)">🔥 '+(k.ms >= 1000 ? Math.floor(k.ms/1000)+'K' : k.ms)+'+/mês</span>' : '') +
+      (k.tr ? '<span class="tag kx hot" title="Ranking de vendas a subir (bem melhor que a média de 30 dias)">📈 a subir</span>' : '');
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
     const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
     // Click-to-copy coupon chip (stops the row link from opening).
