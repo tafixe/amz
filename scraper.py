@@ -1042,7 +1042,7 @@ def get_chollo_items() -> list[tuple[str, str, str, bool, str]]:
 KEEPA_PRICE_SERIES = (0, 8, 18, 33)
 # Sales signals: 'bought in past month' floor, top-N rank in a subcategory /
 # the root category, and 'rising' = current rank at most half its 30-day average.
-KEEPA_SOLD_MIN = int(os.environ.get("KEEPA_SOLD_MIN", "500"))
+KEEPA_SOLD_MIN = int(os.environ.get("KEEPA_SOLD_MIN", "200"))
 KEEPA_TOP_SUB = int(os.environ.get("KEEPA_TOP_SUB", "20"))
 KEEPA_TOP_ROOT = int(os.environ.get("KEEPA_TOP_ROOT", "200"))
 KEEPA_TREND_RATIO = 0.5
