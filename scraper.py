@@ -1719,6 +1719,9 @@ def get_mi_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+TITAS_PAGES = int(os.environ.get("TITAS_PAGES", "4"))
+
+
 def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
     """Source is WordPress; its category pages are JS-rendered, so use the REST
     API. Each post's content has the Amazon ASIN (?asin=ASIN); title is the name.
@@ -1731,7 +1734,9 @@ def get_titas_items() -> list[tuple[str, str, str, bool, str]]:
     direct = SOURCES.get("titas_direct", "")
     if not proxy and not direct:
         return out
-    for page in (1, 2):
+    # The source now mixes many other-store posts in, so read further back to
+    # keep roughly the same number of Amazon deals as before.
+    for page in range(1, TITAS_PAGES + 1):
         posts = None
         srcs = [s for s in (f"{proxy}?page={page}" if proxy else "",
                             f"{direct}{page}" if direct else "") if s]
@@ -2880,8 +2885,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             for l in links:
                 e = (low_cache or {}).get(_asin_from_url(l["url"])) or {}
                 rk = e.get("rank")
-                if e.get("low") and isinstance(rk, int) and 0 < rk <= top_rank:
-                    kept.append(l)
+                if (e.get("low") and isinstance(rk, int) and 0 < rk <= top_rank) or _featured_row(l):
+                    kept.append(l)   # featured stores have no Keepa data: kept as on every tab
             links = kept
 
     # Last resort: fill any still-nameless link from Keepa (paid). Each ASIN is
