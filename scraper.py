@@ -2547,6 +2547,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     # the post text instead.
     show_all = state_key in OTHER_STORE_TABS
     scache = existing.get("scache", {})   # shortener url -> final url ("" = unresolvable)
+    _IMAGE_URL = re.compile(r"\.(?:jpe?g|png|webp|gif|avif)(?:[_?#.]|$)|imgur\.com|alicdn\.com|"
+                            r"aliexpress-media\.com|uguu\.se|/media/files/", re.I)
     _OTHER_SKIP = re.compile(r"t\.me/|telegram\.me/|/category/|worten\.pt/|whatsapp|facebook|instagram", re.I)
     # tidd.ly is Awin's shortener: resolving it once reveals the real store
     # (e.g. Worten), so the row gets the right badge/red dot and a clean link.
@@ -2574,11 +2576,15 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             if AMAZON_HOST_RE.search(u2) or CUSTOM_ASIN_RE.search(u2) or _OTHER_SKIP.search(u2):
                 continue
             aw = 1 if _is_awin(u2) else 0
-            if "awin1.com" in u2:                 # Awin deep link: target in ?ued=
-                ued = (parse_qs(urlparse(u2).query).get("ued") or [""])[0]
-                if ued.startswith("http"):
-                    u2 = unquote(ued)
-            u2 = re.sub(r"[?#].*$", "", u2).rstrip(").,;/")
+            # Affiliate / redirect wrappers (Awin ued=, tracker u=, coupon pages
+            # url=, shortener?https://...) carry the store link inside: use the
+            # innermost one, before the query string is dropped.
+            inner = re.findall(r"https?://[^\s&\"'<>]+", unquote(unquote(html.unescape(u2)))[8:])
+            if inner:
+                u2 = inner[-1]
+            if _IMAGE_URL.search(u2):             # product photo, not a deal link
+                continue
+            u2 = re.sub(r"[?#&].*$", "", u2).rstrip(").,;/")
             host = re.sub(r"^www\.", "", urlparse(u2).netloc.lower())
             shop = ""
             if host in _GENERIC_SHORT and not show_all and host not in _AWIN_HOSTS:
