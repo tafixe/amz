@@ -2401,12 +2401,24 @@ def scrape_amazon_links():
                 row["wt"] = 1
                 row.pop("x", None)
                 wt_all[l["url"]] = row
+    # Undated sightings (a page scanned without a post time) keep the date they
+    # were FIRST seen, persisted from the previous run; stamping "now" every run
+    # made opened deals come back every 10 minutes.
+    wt_prev = r2_get_amazon_links("data/worten.json")
+    wt_first = {l.get("url"): l.get("date") for l in wt_prev.get("links", [])}
+    wt_first.update(wt_prev.get("first", {}))
+    first_out: dict = {}
     for it in _STORE_ITEMS.get("worten") or []:
         u = it.get("url", "")
-        if not u or _hidden(cleared, u, it.get("date") or now_iso):
+        if not u:
+            continue
+        date = it.get("date") or wt_first.get(u) or first_out.get(u) or now_iso
+        if not it.get("date"):
+            first_out[u] = date
+        if _hidden(cleared, u, date):
             continue
         row = {"name": it.get("name") or "Produto Worten", "url": u,
-               "date": it.get("date") or now_iso, "wt": 1}
+               "date": date, "wt": 1}
         if it.get("coupon"):
             row["coupon"] = it["coupon"]
         prev = wt_all.get(u)
@@ -2421,7 +2433,7 @@ def scrape_amazon_links():
             del _SHORT_CACHE[k]
     r2_put_amazon_links({"c": _SHORT_CACHE}, SHORT_CACHE_KEY)
     wt_links = sorted(wt_all.values(), key=lambda l: l.get("date") or "", reverse=True)[:300]
-    r2_put_amazon_links({"updated": now_iso, "links": wt_links}, "data/worten.json")
+    r2_put_amazon_links({"updated": now_iso, "links": wt_links, "first": first_out}, "data/worten.json")
     log.info("[data/worten.json] worten tab: %d links (%d short links opened this run)",
              len(wt_links), _SHORT_OPENED[0])
 
