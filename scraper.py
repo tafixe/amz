@@ -3084,11 +3084,14 @@ def generate_amazon_html() -> str:
   li .tag.kx.prime { border-color:#1d9bf0; color:#38bdf8; font-weight:700; }
   li .tag.kx.sn { opacity:.7; }
   li .tag.kx.hot { border-color:#ea580c; color:#fb923c; font-weight:700; }
-  li .cpn { flex-shrink:0; margin-left:8px; border:1px solid var(--brand); color:var(--brand);
-    background:transparent; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700;
-    cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; }
-  li .cpn:hover { background:rgba(255,153,0,.14); }
-  li .cpn.ok { border-color:var(--green); color:var(--green); }
+  /* Coupon code: the only SOLID chip in the row, so it never blends in with
+     the outlined tags (orange sales tags, store badges). */
+  li .cpn { flex-shrink:0; margin-left:8px; border:1px solid #db2777; color:#fff;
+    background:#db2777; border-radius:6px; padding:2px 9px; font-size:12px; font-weight:800;
+    cursor:pointer; white-space:nowrap; font-family:inherit; line-height:1.6; letter-spacing:.3px;
+    box-shadow:0 0 8px rgba(219,39,119,.55); }
+  li .cpn:hover { background:#be185d; border-color:#be185d; }
+  li .cpn.ok { border-color:var(--green); background:var(--green); color:#04130a; box-shadow:none; }
   li .tag.srctab { border:1px solid var(--border); border-radius:6px; padding:1px 7px;
     margin-left:8px; color:var(--muted); font-weight:600; }
   li .thumb { width:38px; height:38px; object-fit:contain; flex-shrink:0;
@@ -3160,6 +3163,7 @@ def generate_amazon_html() -> str:
   body.dos li .xn { color:var(--text); font-weight:700; margin-right:6px; }
   body.dos li a.wt { box-shadow:inset 3px 0 0 #00ff41; }
   body.dos li .tag.wtag { border-color:var(--border); color:var(--text); }
+  body.dos li .cpn { background:#00ff41; border-color:#00ff41; color:#000; box-shadow:none; }
   body.dos .low-dot { background:#00ff41; box-shadow:none; }
   body.dos .theme-btn { border-color:var(--text); color:var(--text); }
 </style>
