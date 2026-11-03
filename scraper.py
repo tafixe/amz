@@ -678,6 +678,29 @@ def store_scan_text(text: str, date: str = "", name: str = ""):
             store_add("worten", w, date, cpn, name or _store_slug_name(w))
 
 
+def _coupon_targets(post_html: str, code: str, urls: list) -> list:
+    """Which links of a post a coupon belongs to. One- or two-product posts:
+    all of them. Round-up posts (3+ links) usually give a code for ONE item,
+    right next to its link: only the link nearest to the code gets it."""
+    if len(urls) < 3:
+        return urls
+    marks = []                                   # (position, url) for every product link
+    for m in re.finditer(r'href="([^"]+)"', post_html):
+        for u in extract_amazon_urls(html.unescape(m.group(1))):
+            if u in urls:
+                marks.append((m.start(), u))
+    hits = [m.start() for m in re.finditer(re.escape(code), post_html)]
+    if not marks or not hits:
+        return []
+    out = []
+    for h in hits:
+        # nearest link; on a tie the one BEFORE the code (codes follow their link)
+        pos, u = min(marks, key=lambda pm: (abs(pm[0] - h), pm[0] > h))
+        if u not in out:
+            out.append(u)
+    return out
+
+
 def _post_text_name(html_text: str) -> str:
     """Product name from a Telegram post body (tags and links stripped)."""
     t = re.sub(r"<[^>]+>", " ", html_text or "")
@@ -2697,7 +2720,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                     raw_to_src.setdefault(u, _CUR_SRC[0])
                 cpn = extract_coupon_code(post["html"])   # code is in the post body
                 if cpn:
-                    for u in urls:
+                    for u in _coupon_targets(post["html"], cpn, urls):
                         raw_to_coupon.setdefault(u, cpn)
 
     dated = [dt for dt, _ in posts if dt]
