@@ -558,6 +558,33 @@ def resolve_to_worten(u: str, mentions_worten: bool = False) -> str:
 # drained by scan_amazon_list and shown with a store badge. Reset per run.
 _EXTRA_ROWS: dict = {}
 _CUR_TAB: list = [None]   # state_key whose provider is running (its store links join that tab too)
+_CUR_SRC: list = [""]     # real name of the source being read (shown on hover; from secrets at runtime)
+
+
+def _src_host(u) -> str:
+    if isinstance(u, (list, tuple)):
+        u = u[0] if u else ""
+    if isinstance(u, dict):
+        u = u.get("url", "")
+    return re.sub(r"^www\.", "", urlparse(u or "").netloc.lower())
+
+
+def tab_source_names() -> dict:
+    """state_key -> who publishes that tab's web deals (site host), built from
+    the configured secrets at runtime, so no source name lives in the code."""
+    env = os.environ.get
+    m = {"data/amazon_links.json": AMAZON_WEB_PAGES, "data/deluxe.json": SOURCES.get("deluxe_pages"),
+         "data/chollo.json": SOURCES.get("chollo_visit_base"),
+         "data/dez.json": env("DEZ_URL") or SOURCES.get("dez_api"), "data/mi.json": SOURCES.get("mi_api"),
+         "data/cholloes.json": SOURCES.get("cholloes_pages"), "data/camel.json": SOURCES.get("camel_feeds"),
+         "data/titas.json": SOURCES.get("titas_direct") or SOURCES.get("titas_proxy"),
+         "data/terapia.json": SOURCES.get("terapia_api") or env("TERAPIA_API"),
+         "data/dib.json": env("DIB_URL") or SOURCES.get("dib_url"),
+         "data/g4.json": SOURCES.get("g4_feed") or env("G4_FEED"), "data/xaxu.json": env("XAXU_URL"),
+         "data/bom.json": env("BOM_URL") or SOURCES.get("bom_url")}
+    for k, cfg in EXTRA_FEEDS.items():
+        m[f"data/{k}.json"] = (cfg or {}).get("url", "")
+    return {k: _src_host(v) for k, v in m.items() if v}
 # The only tabs that also list other stores' deals; every other tab stays Amazon-only.
 OTHER_STORE_TABS = {"data/amazon_links.json", "data/descontos.json", "data/dez.json",
                     "data/nas.json", "data/dib.json"}
@@ -588,6 +615,8 @@ def tab_other(shop: str, url: str, date: str = "", coupon: str = "", name: str =
     if shop.lower() == "prozis":
         shop = "Prozis"
     row = {"url": url, "date": date or "", "shop": shop, "name": name or "Produto " + shop}
+    if _CUR_SRC[0]:
+        row["src"] = _CUR_SRC[0]
     if _is_awin(url):
         row["aw"] = 1
     if key not in OTHER_STORE_TABS and not _featured_row(row):
@@ -625,7 +654,7 @@ def _store_slug_name(url: str) -> str:
 
 
 def store_add(store: str, url: str, date: str = "", coupon: str = "", name: str = ""):
-    _STORE_ITEMS[store].append({"url": url, "date": date or "",
+    _STORE_ITEMS[store].append({"url": url, "date": date or "", "src": _CUR_SRC[0],
                                 "coupon": coupon or "", "name": name or ""})
     tab_other(store, url, date, coupon, name)
 
@@ -722,6 +751,8 @@ def write_store_tabs(cleared: dict):
                     prev["date"] = it["date"]
                 if it.get("coupon") and not prev.get("coupon"):
                     prev["coupon"] = it["coupon"]
+                if it.get("src") and not prev.get("src"):
+                    prev["src"] = it["src"]
                 pn = prev.get("name") or ""
                 if it.get("name") and (not pn or pn.startswith("Produto ")
                                        or re.fullmatch(r"[0-9 ]+", pn)):
@@ -758,9 +789,11 @@ def write_store_tabs(cleared: dict):
             # id-only slug and no source gave a name yet -> generic placeholder
             if not l.get("name") or re.fullmatch(r"[0-9 ]+", l["name"]):
                 l["name"] = f"Produto {label}"
-        for l in links:                      # tidy: drop empty coupon fields
+        for l in links:                      # tidy: drop empty coupon / source fields
             if not l.get("coupon"):
                 l.pop("coupon", None)
+            if not l.get("src"):
+                l.pop("src", None)
         r2_put_amazon_links({"updated": now_iso, "links": links}, key)
         log.info("[%s] store tab: %d links (%d new this run)", key, len(links), fresh)
 
@@ -1575,6 +1608,8 @@ def get_dez_items(cupo_recent=None) -> list[tuple[str, str, str, bool]]:
                    "date": _pubdate(link, p.get("currentPrice"),
                                     p.get("updatedAt") or p.get("promoDay") or ""),
                    "shop": shop}
+            if _CUR_SRC[0]:
+                row["src"] = _CUR_SRC[0]
             if (p.get("coupon") or "").strip():
                 row["coupon"] = p["coupon"].strip()
             if shop == "Worten":
@@ -2424,6 +2459,8 @@ def scrape_amazon_links():
             continue
         row = {"name": it.get("name") or "Produto Worten", "url": u,
                "date": date, "wt": 1}
+        if it.get("src"):
+            row["src"] = it["src"]
         if it.get("coupon"):
             row["coupon"] = it["coupon"]
         prev = wt_all.get(u)
@@ -2553,7 +2590,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             wt_seen.add(u)
             seg = [s for s in path.split("/") if s]
             slug = re.sub(r"[-_]+", " ", seg[-1]).strip() if seg else ""
-            wt_rows.append({"url": u, "date": date, "wt": 1,
+            wt_rows.append({"url": u, "date": date, "wt": 1, "src": _CUR_SRC[0],
                             "name": name or (_clean_name(slug) if len(slug) > 3 else "Produto Worten"),
                             "coupon": extract_coupon_code(text)})
 
@@ -2631,7 +2668,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                 continue
             wt_seen.add(u2)
             shop = shop or _shop_label(host)
-            row = {"url": u2, "date": date, "shop": shop,
+            row = {"url": u2, "date": date, "shop": shop, "src": _CUR_SRC[0],
                    "name": name or "Produto " + shop, "coupon": extract_coupon_code(h)}
             if aw:
                 row["aw"] = 1
@@ -2642,7 +2679,10 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         return found_amz
 
     posts: list[tuple[datetime | None, list[str]]] = []
+    raw_to_src: dict[str, str] = {}    # raw url -> who published it (channel / site)
+    src_names = tab_source_names()
     for channel in channels:
+        _CUR_SRC[0] = "@" + channel
         for post in get_telegram_link_posts(channel):
             dt_iso = post["dt"].isoformat() if post["dt"] else ""
             # Tracked non-Amazon stores go to their own transversal tabs.
@@ -2653,6 +2693,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             urls += [u for u in extra_amz if u not in urls]
             if urls:
                 posts.append((post["dt"], urls))
+                for u in urls:
+                    raw_to_src.setdefault(u, _CUR_SRC[0])
                 cpn = extract_coupon_code(post["html"])   # code is in the post body
                 if cpn:
                     for u in urls:
@@ -2675,12 +2717,14 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                 raw_to_date[raw] = dt.isoformat() if dt else ""
     # Web pages are always included (no batching concept there).
     for page in web_pages:
+        _CUR_SRC[0] = _src_host(page)
         try:
             resp = requests.get(page, timeout=30, headers=_BROWSER_HEADERS)
             resp.raise_for_status()
             store_scan_text(resp.text)   # tracked stores -> their own tabs
             _wt_collect(resp.text)       # Worten -> kept in this tab, marked
             for raw in extract_amazon_urls(resp.text):
+                raw_to_src.setdefault(raw, _CUR_SRC[0])
                 if raw not in seen_raw:
                     seen_raw.add(raw)
                     candidates.append(raw)
@@ -2692,11 +2736,13 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     raw_to_name: dict[str, str] = {}   # name supplied by the source (for /dp/ASIN links)
     if items_fn:
         _CUR_TAB[0] = state_key
+        _CUR_SRC[0] = src_names.get(state_key, "")
         try:
             for item in items_fn():
                 raw, date, coupon = item[0], item[1], item[2]
                 low = item[3] if len(item) > 3 else False
                 iname = item[4] if len(item) > 4 else ""
+                raw_to_src.setdefault(raw, _CUR_SRC[0])
                 if raw not in seen_raw:
                     seen_raw.add(raw)
                     candidates.append(raw)
@@ -2710,6 +2756,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         except Exception as e:
             log.error("items provider failed for %s: %s", state_key, e)
         _CUR_TAB[0] = None
+    _CUR_SRC[0] = ""
 
     log.info("[%s] latest batch: %d unique raw Amazon URLs (%d with coupon code)",
              state_key, len(candidates), len(raw_to_coupon))
@@ -2802,6 +2849,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             link_date = seen.get(url) or now_iso
             seen[url] = link_date
         link = {"name": name, "url": url, "date": link_date}
+        if raw_to_src.get(raw_url):
+            link["src"] = raw_to_src[raw_url]
         if coupon:
             link["coupon"] = coupon
         if raw_to_low.get(raw_url):
@@ -3171,7 +3220,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null, src:l.src||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -3287,6 +3336,7 @@ function visibleItems(){
         if (!p.img && l.img) p.img = l.img;
         if (!p.low && l.low) { p.low = true; p.minp = l.minp; p.minlbl = l.minlbl; }
         if (!p.kx && l.kx) p.kx = l.kx;
+        if (l.src && (p.src||"").split(", ").indexOf(l.src) < 0) p.src = p.src ? p.src+", "+l.src : l.src;
         if (dateMs(l) > dateMs(p)) { p.date = l.date; p.extra = l.extra; }
       }
     }
@@ -3384,7 +3434,7 @@ function render(){
     const shopName = l.shop || (l.wt ? 'Worten' : '');
     const wbadge = shopName ? '<span class="tag wtag">'+esc(shopName)+'</span>' : '';
     const row = '<li data-url="'+esc(l.url)+'" data-date="'+esc(l.date||"")+'"><a'+dupStyle+' class="'+(useGreen && visited.has(l.url)?'visited':'')+(shopName?' wt':'')+'" href="'+esc(l.url)+'" target="_blank" rel="noopener">'+
-      th + '<span class="name">'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+
+      th + '<span class="name"'+(l.src ? ' title="Publicado por: '+esc(l.src)+'"' : '')+'>'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+
       ((wbadge + cpn + kxt + val + src) ? '<span class="tags">'+wbadge + cpn + kxt + val + src+'</span>' : '') + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
     if (grouping) {
