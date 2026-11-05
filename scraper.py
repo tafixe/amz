@@ -113,15 +113,15 @@ AMAZON_MAX_TITLE_FETCH_PER_RUN = int(os.environ.get("AMAZON_MAX_TITLE_FETCH_PER_
 # all-time-low price. Needs a paid API key; without it the feature is disabled.
 KEEPA_API_KEY = os.environ.get("KEEPA_API_KEY", "").strip()
 KEEPA_DOMAIN = int(os.environ.get("KEEPA_DOMAIN", "9"))      # 9 = amazon.es
-KEEPA_TTL_HOURS = int(os.environ.get("KEEPA_TTL_HOURS", "6"))  # re-price each ASIN every 6h (catch fresh drops)
+KEEPA_TTL_HOURS = int(os.environ.get("KEEPA_TTL_HOURS", "24"))  # re-price each ASIN once a day (saves tokens)
 # Token safety: cap how many NEW titles we look up per list each run (each is
 # queried at most once ever, then cached). Keeps token use well under budget.
-KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "25"))
+KEEPA_MAX_TITLES_PER_LIST = int(os.environ.get("KEEPA_MAX_TITLES_PER_LIST", "10"))
 # All-time-low flag is transversal to every tab; cap how many ASINs we (re)price
 # per run so token use stays well within budget (each ~1 token, cached 24h).
-# Keepa refills 5 tokens/min (300/h) and we scan 6x/h, so 50/run spends exactly
-# the refill rate — full use of the quota without ever draining the balance.
-KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "50"))
+# Kept low (15/run, ~30% of the 5 tokens/min refill) so most of the quota is
+# left for other uses of the same Keepa key. Raise via env when tokens allow.
+KEEPA_MAX_PRICE_PER_RUN = int(os.environ.get("KEEPA_MAX_PRICE_PER_RUN", "15"))
 # Flag as all-time low when current <= lowest * (1 + margin). 0.005 = 0.5%,
 # per the Keepa minimum-detection module spec.
 KEEPA_LOW_MARGIN = float(os.environ.get("KEEPA_LOW_MARGIN", "0.005"))
@@ -869,7 +869,7 @@ def _code_field(txt: str) -> str:
 
 
 XAXU_MAP_KEY = "data/xaxu_map.json"
-XAXU_SEARCH_MAX = int(os.environ.get("XAXU_SEARCH_MAX", "4"))   # Keepa searches per run
+XAXU_SEARCH_MAX = int(os.environ.get("XAXU_SEARCH_MAX", "1"))   # Keepa searches per run (10 tokens each)
 _XAXU_UNMAPPED: list = []   # Amazon cards without a confirmed ASIN this run
 _XAXU_CTX: dict = {}        # run context (hide-on-open map) set before the tabs loop
 
