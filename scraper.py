@@ -2029,9 +2029,11 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
             log.warning("pg page %d: %s", page, e)
             break
         if r.status_code != 200:
+            log.warning("pg page %d: HTTP %s (%s)", page, r.status_code, r.headers.get("server", ""))
             break
         cards = re.split(r'<li class="wp-block-post ', r.text)[1:]
         if not cards:
+            log.warning("pg page %d: no cards (%d bytes)", page, len(r.text))
             break
         for c in cards:
             m = re.search(r"post-(\d+)", c[:300])
@@ -2054,7 +2056,7 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
             elif store.lower() == "worten":
                 tab_other("Worten", outs[0], date, "", name)
                 wt += 1
-    log.info("pg: %d amazon.es products, %d worten", len(out), wt)
+    log.info("pg: %d amazon.es products, %d worten (%d dated posts)", len(out), wt, len(dates))
     return out
 
 
