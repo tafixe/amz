@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1983,7 +1984,7 @@ def get_g4_items() -> list[tuple[str, str, str, bool, str]]:
 # STRAIGHT to the store, clean. Post/store lookups are cached in R2 so each
 # page is fetched once, ever. The UI groups this tab by store, coupons first.
 # ---------------------------------------------------------------------------
-PG_PAGES = int(os.environ.get("PG_PAGES", "5"))
+PG_PAGES = int(os.environ.get("PG_PAGES", "3"))
 PG_KEY = "data/pg.json"
 
 
@@ -2022,6 +2023,8 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
     wt = 0
     lst = (cfg.get("list") or "").strip("/")
     for page in range(1, PG_PAGES + 1):
+        if page > 1:
+            time.sleep(2)   # the site rate-limits bursts (HTTP 429)
         url = f"{base}/{lst}/" + (f"page/{page}/" if page > 1 else "")
         try:
             r = sess.get(url, timeout=40)
