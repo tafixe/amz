@@ -39,6 +39,7 @@ jobs:
           SOURCES_JSON: ${{ secrets.SOURCES_JSON }}
           TERAPIA_API: ${{ secrets.TERAPIA_API }}
           DIB_URL: ${{ secrets.DIB_URL }}
+          PG_JSON: ${{ secrets.PG_JSON }}
           BOM_URL: ${{ secrets.BOM_URL }}
           EXTRA_FEEDS_JSON: ${{ secrets.EXTRA_FEEDS_JSON }}
           REF_TOKEN: ${{ secrets.REF_TOKEN }}

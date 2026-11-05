@@ -581,7 +581,8 @@ def tab_source_names() -> dict:
          "data/terapia.json": SOURCES.get("terapia_api") or env("TERAPIA_API"),
          "data/dib.json": env("DIB_URL") or SOURCES.get("dib_url"),
          "data/g4.json": SOURCES.get("g4_feed") or env("G4_FEED"), "data/xaxu.json": env("XAXU_URL"),
-         "data/bom.json": env("BOM_URL") or SOURCES.get("bom_url")}
+         "data/bom.json": env("BOM_URL") or SOURCES.get("bom_url"),
+         "data/pg.json": _pg_cfg().get("base")}
     for k, cfg in EXTRA_FEEDS.items():
         m[f"data/{k}.json"] = (cfg or {}).get("url", "")
     return {k: _src_host(v) for k, v in m.items() if v}
@@ -592,6 +593,8 @@ OTHER_STORE_TABS = {"data/amazon_links.json", "data/descontos.json", "data/dez.j
 # tab shows, each with its own coloured dot.
 FEATURED_SHOPS = {"Worten", "AliExpress", "PCComponentes", "Prozis"}
 _AWIN_HOSTS = ("tidd.ly", "awin1.com")
+# Tabs whose source shows no prices: only Keepa all-time lows are listed.
+LOW_ONLY_TABS = {"data/pg.json"}
 
 
 def _is_awin(url: str) -> bool:
@@ -1980,6 +1983,81 @@ def get_g4_items() -> list[tuple[str, str, str, bool, str]]:
 # STRAIGHT to the store, clean. Post/store lookups are cached in R2 so each
 # page is fetched once, ever. The UI groups this tab by store, coupons first.
 # ---------------------------------------------------------------------------
+PG_PAGES = int(os.environ.get("PG_PAGES", "5"))
+PG_KEY = "data/pg.json"
+
+
+def _pg_cfg() -> dict:
+    try:
+        return json.loads(os.environ.get("PG_JSON", "") or "{}")
+    except ValueError:
+        return {}
+
+
+def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
+    """Curated product catalogue (WordPress, custom post type). It shows no
+    prices, so the tab keeps only what Keepa says is at its all-time low
+    (LOW_ONLY_TABS). Listing cards carry the post id, store name and outbound
+    link; the REST API gives each post's exact date. Only Amazon and Worten
+    are kept (the rest are brand placements, not deals).
+    Config (secret PG_JSON): {"base": site, "rest": post type rest_base,
+    "list": listing path}."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    cfg = _pg_cfg()
+    base = (cfg.get("base") or "").rstrip("/")
+    if not base:
+        return out
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    dates: dict = {}
+    try:
+        posts = sess.get(f"{base}/wp-json/wp/v2/{cfg.get('rest', 'posts')}",
+                         params={"per_page": 100, "_fields": "id,date_gmt"}, timeout=40).json()
+        for p in posts if isinstance(posts, list) else []:
+            if p.get("date_gmt"):
+                dates[p.get("id")] = p["date_gmt"] + "+00:00"
+    except (requests.RequestException, ValueError) as e:
+        log.warning("pg rest: %s", e)
+    seen = set()
+    wt = 0
+    lst = (cfg.get("list") or "").strip("/")
+    for page in range(1, PG_PAGES + 1):
+        url = f"{base}/{lst}/" + (f"page/{page}/" if page > 1 else "")
+        try:
+            r = sess.get(url, timeout=40)
+        except requests.RequestException as e:
+            log.warning("pg page %d: %s", page, e)
+            break
+        if r.status_code != 200:
+            break
+        cards = re.split(r'<li class="wp-block-post ', r.text)[1:]
+        if not cards:
+            break
+        for c in cards:
+            m = re.search(r"post-(\d+)", c[:300])
+            pid = int(m.group(1)) if m else None
+            outs = [html.unescape(u) for u in re.findall(r'href="(https?://[^"]+)"', c)
+                    if urlparse(u).netloc.lower().removeprefix("www.") != urlparse(base).netloc.lower().removeprefix("www.")]
+            if not outs:
+                continue
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c))
+            sm = re.search(r"Dispon\w+ na (\S+)", text)
+            store = sm.group(1) if sm else ""
+            tm = re.search(r"<h[23][^>]*>(.*?)</h[23]>", c, re.S)
+            name = _clean_name(html.unescape(re.sub(r"<[^>]+>", "", tm.group(1)))) if tm else ""
+            date = dates.get(pid, "")
+            am = re.search(r"amazon\.es/(?:[^\s\"]*/)?(?:dp|gp/product)/([A-Z0-9]{10})", outs[0])
+            if am:
+                if am.group(1) not in seen:
+                    seen.add(am.group(1))
+                    out.append((f"https://www.amazon.es/dp/{am.group(1)}", date, "", False, name))
+            elif store.lower() == "worten":
+                tab_other("Worten", outs[0], date, "", name)
+                wt += 1
+    log.info("pg: %d amazon.es products, %d worten", len(out), wt)
+    return out
+
+
 BOM_TAB_KEY = "data/bom.json"
 BOM_MAP_KEY = "data/bom_map.json"
 BOM_MAX_FETCH = int(os.environ.get("BOM_MAX_FETCH", "15"))
@@ -2414,6 +2492,7 @@ def scrape_amazon_links():
         ([], [], get_titas_items, "data/titas.json"),
         (TG_TABS.get("terapia", []), [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
+        ([], [], get_pg_items, PG_KEY),
         ([], [], get_g4_items, "data/g4.json"),
         (JP_CHANNELS, [], None, "data/jp.json"),
         ([], [], get_xaxu_items, XAXU_KEY),
@@ -2425,7 +2504,7 @@ def scrape_amazon_links():
         by_date = state_key in ("data/deluxe.json", "data/chollo.json",
                                 "data/dez.json", "data/nas.json", "data/mi.json",
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
-                                "data/terapia.json", "data/dib.json", "data/g4.json", "data/jp.json",
+                                "data/terapia.json", "data/dib.json", PG_KEY, "data/g4.json", "data/jp.json",
                                 XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json", "data/china.json",
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
@@ -2952,12 +3031,13 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
                      if (low_cache.get(_asin_from_url(l["url"])) or {}).get("cat") not in BOOK_CATS]
         # Curated tab: keep only all-time lows that are also in the top-N most
         # popular (Keepa sales rank <= top_rank). Needs the ASIN to be priced.
-        if top_rank:
+        # Price-less catalogue tabs: keep only all-time lows (no rank needed).
+        if top_rank or state_key in LOW_ONLY_TABS:
             kept = []
             for l in links:
                 e = (low_cache or {}).get(_asin_from_url(l["url"])) or {}
                 rk = e.get("rank")
-                if (e.get("low") and isinstance(rk, int) and 0 < rk <= top_rank) or _featured_row(l):
+                if (e.get("low") and (not top_rank or (isinstance(rk, int) and 0 < rk <= top_rank))) or _featured_row(l):
                     kept.append(l)   # featured stores have no Keepa data: kept as on every tab
             links = kept
 
@@ -3195,6 +3275,7 @@ const TABS = [
   { id:"titas",  label:"TITAS",      src:"/data/titas.json",        kind:"tg" },
   { id:"terapia", label:"Terapia",   src:"/data/terapia.json",      kind:"tg" },
   { id:"dib",    label:"Dib",        src:"/data/dib.json",          kind:"tg", others:true },
+  { id:"pg",     label:"PG",         src:"/data/pg.json",           kind:"tg" },
   { id:"g4",     label:"4G",         src:"/data/g4.json",           kind:"tg" },
   { id:"jp",     label:"JP",         src:"/data/jp.json",           kind:"tg" },
   { id:"xaxu",   label:"xaxu",       src:"/data/xaxu.json",         kind:"tg" },
