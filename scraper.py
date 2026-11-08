@@ -58,6 +58,12 @@ try:
     TG_TABS = json.loads(os.environ.get("TG_TABS_JSON", "{}") or "{}")
 except ValueError:
     TG_TABS = {}
+# Second secret, merged in: list values are appended (the first can't be read back to edit).
+try:
+    for _k, _v in json.loads(os.environ.get("TG_TABS_EXTRA_JSON", "{}") or "{}").items():
+        TG_TABS[_k] = (TG_TABS.get(_k) or []) + _v if isinstance(_v, list) else _v
+except (ValueError, AttributeError, TypeError):
+    pass
 TG_NEW_TABS = ("super", "erdc", "caza", "china")
 
 # Extra Telegram tab ("JP"): channel names in a secret (JSON list).
