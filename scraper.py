@@ -260,7 +260,7 @@ def _slug_name(path: str) -> str:
     return name[:200] if len(name) > 3 else ""
 
 
-def resolve_amazon_link(raw_url: str) -> dict | None:
+def resolve_amazon_link(raw_url: str, keep_other: bool = False) -> dict | None:
     """Expand short links, extract ASIN, and build clean + affiliate URLs.
 
     Returns a dict (without status/source) or None if it isn't a product link.
@@ -280,6 +280,13 @@ def resolve_amazon_link(raw_url: str) -> dict | None:
             return None
 
     parsed = urlparse(final_url)
+    # A source's own shortener may also point at another store (AliExpress...):
+    # the caller can route that to the store rows instead of dropping it.
+    if keep_other and final_url != raw_url and "amazon." not in parsed.netloc.lower():
+        for store, host in (("aliexpress", "aliexpress."), ("pcc", "pccomponentes."), ("worten", "worten.pt")):
+            if host in parsed.netloc.lower():
+                return {"other": store, "url": re.sub(r"[?#].*$", "", final_url)
+                        if store != "aliexpress" or "/item/" in final_url else final_url}
     marketplace = _amazon_marketplace(parsed.netloc)
 
     asin_match = ASIN_RE.search(parsed.path)
@@ -2953,20 +2960,31 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     links: list[dict] = []
     seen_ids = set()
 
-    drops = {"notprod": 0, "opened": 0, "onsite": 0}
+    drops = {"notprod": 0, "opened": 0, "onsite": 0, "store": 0}
     for raw_url in candidates:
         # Use cached resolution if we've expanded this URL before.
-        if raw_url in cache:
+        # Old-style misses (None) on short links are re-checked once: they may
+        # lead to another store (routed below); new misses are stored as False.
+        retry = (raw_url in cache and cache[raw_url] is None
+                 and any(urlparse(raw_url).netloc.lower().endswith(h) for h in AMAZON_SHORT_HOSTS))
+        if raw_url in cache and not retry:
             resolved = cache[raw_url]
         else:
             if resolved_this_run >= AMAZON_MAX_RESOLVE_PER_RUN:
                 deferred += 1
                 continue  # picked up on a later run
-            resolved = resolve_amazon_link(raw_url)
+            resolved = resolve_amazon_link(raw_url, keep_other=True)
             resolved_this_run += 1
-            cache[raw_url] = resolved  # cache hits and misses (None)
-        if resolved is None:  # not a product link
+            cache[raw_url] = resolved if resolved is not None else False  # misses are cached too
+        if not resolved:  # not a product link
             drops["notprod"] += 1
+            continue
+        if resolved.get("other"):   # short link that leads to another store
+            _CUR_TAB[0] = state_key
+            store_add(resolved["other"], resolved["url"], raw_to_date.get(raw_url, ""),
+                      raw_to_coupon.get(raw_url, ""), raw_to_name.get(raw_url, ""))
+            _CUR_TAB[0] = None
+            drops["store"] += 1
             continue
         # Self-heal: a name that is just the ASIN counts as no name at all
         # (repairs cached entries poisoned by the old slug fallback too).
@@ -3165,8 +3183,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     r2_put_amazon_links(data, state_key)
     log.info("[%s] complete: %d links, resolved %d new, deferred %d, titles %d",
              state_key, len(links), resolved_this_run, deferred, titles_this_run)
-    log.info("[%s] dropped: %d not a product, %d already opened, %d already on the site",
-             state_key, drops["notprod"], drops["opened"], drops["onsite"])
+    log.info("[%s] dropped: %d not a product, %d already opened, %d already on the site (%d short links -> other store)",
+             state_key, drops["notprod"], drops["opened"], drops["onsite"], drops["store"])
     return data
 
 
