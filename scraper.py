@@ -2069,6 +2069,78 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+CHOLLOES_PAGES = int(os.environ.get("CHOLLOES_PAGES", "3"))
+CHOLLOES_MAP_KEY = "data/cholloes_map.json"
+_REL_UNITS = {"segundo": 1, "minuto": 60, "hora": 3600, "día": 86400, "dia": 86400,
+              "semana": 604800, "mes": 2592000}
+
+
+def _rel_es(txt: str, now: datetime) -> str:
+    """'6 minutos' / 'una hora' / '2 días' (Spanish 'hace ...') -> ISO date."""
+    m = re.match(r"\s*(\d+|un|una)\s+([a-zí]+)", txt or "", re.I)
+    if not m:
+        return ""
+    n = 1 if m.group(1).lower() in ("un", "una") else int(m.group(1))
+    unit = next((v for k, v in _REL_UNITS.items() if m.group(2).lower().startswith(k)), None)
+    return (now - timedelta(seconds=n * unit)).isoformat() if unit else ""
+
+
+def get_cholloes_items() -> list[tuple[str, str, str, bool, str]]:
+    """The source's home page only carries a few direct Amazon links; its
+    Amazon-store search listing has every Amazon deal, newest first, each card
+    with the /dp/ASIN link, title and 'published N ago'. Same host as the
+    configured page (secret), so no name lives here."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    pages = SOURCES.get("cholloes_pages") or []
+    first = pages[0] if isinstance(pages, list) and pages else pages
+    u = urlparse(first if isinstance(first, str) else "")
+    if not u.netloc:
+        return out
+    base = f"{u.scheme or 'https'}://{u.netloc}"
+    sess = requests.Session()
+    sess.headers.update(_BROWSER_HEADERS)
+    now = datetime.now(timezone.utc)
+    seen = set()
+    # 'N hours ago' is coarse: recomputed every run it would drift forward and
+    # bring opened deals back. Keep the earliest date ever computed per ASIN.
+    dmap: dict = r2_get_amazon_links(CHOLLOES_MAP_KEY).get("d", {})
+    for page in range(1, CHOLLOES_PAGES + 1):
+        if page > 1:
+            time.sleep(1.5)
+        try:
+            r = sess.get(f"{base}/buscar", params={"store_id": 25, **({"page": page} if page > 1 else {})},
+                         timeout=40)
+        except requests.RequestException as e:
+            log.warning("cholloes page %d: %s", page, e)
+            break
+        if r.status_code != 200:
+            log.warning("cholloes page %d: HTTP %s", page, r.status_code)
+            break
+        cards = re.split(r'data-deal-id="', r.text)[1:]
+        if not cards:
+            break
+        for c in cards:
+            c = html.unescape(c)
+            m = re.search(r"amazon\.es\\?/(?:[^\s\"]*/)?dp\\?/([A-Z0-9]{10})", c)
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            t = re.search(r"<h3[^>]*>\s*(.*?)\s*</h3>", c, re.S)
+            name = _clean_name(re.sub(r"<[^>]+>", "", t.group(1))) if t else ""
+            when = re.search(r"Publicado hace ([^\"<]+)", c)
+            d = _rel_es(when.group(1), now) if when else ""
+            a = m.group(1)
+            if dmap.get(a) and (not d or dmap[a] < d):
+                d = dmap[a]
+            elif d:
+                dmap[a] = d
+            out.append((f"https://www.amazon.es/dp/{a}", d, "", False, name))
+    if out:
+        r2_put_amazon_links({"d": dict(list(dmap.items())[-3000:])}, CHOLLOES_MAP_KEY)
+    log.info("cholloes: %d amazon.es deals", len(out))
+    return out
+
+
 BOM_TAB_KEY = "data/bom.json"
 BOM_MAP_KEY = "data/bom_map.json"
 BOM_MAX_FETCH = int(os.environ.get("BOM_MAX_FETCH", "15"))
@@ -2498,7 +2570,7 @@ def scrape_amazon_links():
         ([], [], lambda: get_dez_items(set()), "data/dez.json"),
         (SOURCES.get("nas_channels", []), [], None, "data/nas.json"),
         ([], [], get_mi_items, "data/mi.json"),
-        ([], SOURCES.get("cholloes_pages", []), None, "data/cholloes.json"),
+        ([], [], get_cholloes_items, "data/cholloes.json"),
         ([], [], get_camel_items, "data/camel.json"),
         ([], [], get_titas_items, "data/titas.json"),
         (TG_TABS.get("terapia", []), [], get_terapia_items, "data/terapia.json"),
@@ -2881,6 +2953,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     links: list[dict] = []
     seen_ids = set()
 
+    drops = {"notprod": 0, "opened": 0, "onsite": 0}
     for raw_url in candidates:
         # Use cached resolution if we've expanded this URL before.
         if raw_url in cache:
@@ -2893,6 +2966,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
             resolved_this_run += 1
             cache[raw_url] = resolved  # cache hits and misses (None)
         if resolved is None:  # not a product link
+            drops["notprod"] += 1
             continue
         # Self-heal: a name that is just the ASIN counts as no name at all
         # (repairs cached entries poisoned by the old slug fallback too).
@@ -2905,6 +2979,7 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # Hidden-on-open, per publication (re-published with a newer date -> back).
         _cd = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"]) or now_iso
         if _hidden(cleared, resolved["affiliate_url"], _cd):
+            drops["opened"] += 1
             continue
         if exclude_asins and resolved["asin"] in exclude_asins:
             continue   # already on an earlier tab this run — keep tabs unique
@@ -2915,10 +2990,12 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # On the reference source RIGHT NOW (inside its window): hidden, no
         # exceptions — a source's fresher timestamp must not bring it back.
         if cupo_now and resolved["asin"] in cupo_now:
+            drops["onsite"] += 1
             continue
         if banned is not None and resolved["asin"] in banned:
             src_date = raw_to_date.get(raw_url) or seen.get(resolved["affiliate_url"], "")
             if not _dt_after(src_date, _ban_until(banned[resolved["asin"]])):
+                drops["onsite"] += 1
                 continue                               # published while it was on the site
             banned.pop(resolved["asin"], None)         # re-published after the window -> back
 
@@ -3088,6 +3165,8 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
     r2_put_amazon_links(data, state_key)
     log.info("[%s] complete: %d links, resolved %d new, deferred %d, titles %d",
              state_key, len(links), resolved_this_run, deferred, titles_this_run)
+    log.info("[%s] dropped: %d not a product, %d already opened, %d already on the site",
+             state_key, drops["notprod"], drops["opened"], drops["onsite"])
     return data
 
 
