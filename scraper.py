@@ -64,7 +64,7 @@ try:
         TG_TABS[_k] = (TG_TABS.get(_k) or []) + _v if isinstance(_v, list) else _v
 except (ValueError, AttributeError, TypeError):
     pass
-TG_NEW_TABS = ("super", "erdc", "caza", "china")
+TG_NEW_TABS = ("super", "erdc", "caza", "china", "cdc")
 
 # Extra Telegram tab ("JP"): channel names in a secret (JSON list).
 try:
@@ -596,7 +596,7 @@ def tab_source_names() -> dict:
          "data/dib.json": env("DIB_URL") or SOURCES.get("dib_url"),
          "data/g4.json": SOURCES.get("g4_feed") or env("G4_FEED"), "data/xaxu.json": env("XAXU_URL"),
          "data/bom.json": env("BOM_URL") or SOURCES.get("bom_url"),
-         "data/pg.json": _pg_cfg().get("base")}
+         "data/pg.json": _pg_cfg().get("base"), "data/sa.json": env("SA_URL")}
     for k, cfg in EXTRA_FEEDS.items():
         m[f"data/{k}.json"] = (cfg or {}).get("url", "")
     return {k: _src_host(v) for k, v in m.items() if v}
@@ -2148,6 +2148,50 @@ def get_cholloes_items() -> list[tuple[str, str, str, bool, str]]:
     return out
 
 
+SA_KEY = "data/sa.json"
+
+
+def get_sa_items() -> list[tuple[str, str, str, bool, str]]:
+    """Automated Amazon-deals site: one public JSON file with every deal
+    (title, prices, discount, Amazon link, 'HH:MM DD-MM-YYYY' time). It posts
+    hundreds a day, mostly against inflated list prices, so only the ones the
+    site itself flags as hot are kept. URL in secret SA_URL."""
+    out: list[tuple[str, str, str, bool, str]] = []
+    url = os.environ.get("SA_URL", "")
+    if not url:
+        return out
+    try:
+        r = requests.get(url, headers=_BROWSER_HEADERS, timeout=60)
+        deals = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning("sa: %s", e)
+        return out
+    seen = set()
+    for d in deals if isinstance(deals, list) else []:
+        if not d.get("isHot"):
+            continue
+        m = re.search(r"/dp/([A-Z0-9]{10})", d.get("affiliateUrl") or "")
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        date = ""
+        tm = re.match(r"\s*(\d{1,2}):(\d{2})\s+(\d{1,2})-(\d{1,2})-(\d{4})", d.get("expiresIn") or "")
+        if tm:
+            hh, mi, dd, mo, yy = map(int, tm.groups())
+            try:
+                # The stamps run ahead of Madrid time (newest ones are up to
+                # ~40 min in the future), so they are read as UTC+2.
+                dt = datetime(yy, mo, dd, hh, mi, tzinfo=timezone(timedelta(hours=2)))
+                date = min(dt, datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+            except ValueError:
+                date = ""
+        name = _clean_name(d.get("title") or "")
+        out.append((f"https://www.amazon.es/dp/{m.group(1)}", date, "", False, name))
+    out.sort(key=lambda x: x[1], reverse=True)
+    log.info("sa: %d hot amazon.es deals (of %d)", len(out), len(deals) if isinstance(deals, list) else 0)
+    return out
+
+
 BOM_TAB_KEY = "data/bom.json"
 BOM_MAP_KEY = "data/bom_map.json"
 BOM_MAX_FETCH = int(os.environ.get("BOM_MAX_FETCH", "15"))
@@ -2583,6 +2627,7 @@ def scrape_amazon_links():
         (TG_TABS.get("terapia", []), [], get_terapia_items, "data/terapia.json"),
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_pg_items, PG_KEY),
+        ([], [], get_sa_items, SA_KEY),
         ([], [], get_g4_items, "data/g4.json"),
         (JP_CHANNELS, [], None, "data/jp.json"),
         ([], [], get_xaxu_items, XAXU_KEY),
@@ -2596,6 +2641,7 @@ def scrape_amazon_links():
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", PG_KEY, "data/g4.json", "data/jp.json",
                                 XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json", "data/china.json",
+                                "data/cdc.json", SA_KEY,
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -3391,6 +3437,8 @@ const TABS = [
   { id:"erdc",   label:"ERdC",       src:"/data/erdc.json",         kind:"tg" },
   { id:"caza",   label:"Caza",       src:"/data/caza.json",         kind:"tg" },
   { id:"china",  label:"China",      src:"/data/china.json",        kind:"tg" },
+  { id:"cdc",    label:"CdC",        src:"/data/cdc.json",          kind:"tg" },
+  { id:"sa",     label:"SA",         src:"/data/sa.json",           kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
