@@ -3331,6 +3331,11 @@ def generate_amazon_html() -> str:
   li .thumb { width:38px; height:38px; object-fit:contain; flex-shrink:0;
     margin-right:10px; border-radius:6px; background:#fff; }
   /* Grouped/compact mode (Bom): store header rows + tighter items */
+  /* Telegram round-up post (3+ products): hairline with its date/time on top. */
+  li.post-sep { display:flex; align-items:center; gap:8px; padding:6px 14px 2px;
+    color:var(--muted); font-size:10px; letter-spacing:.3px; }
+  li.post-sep::after { content:""; flex:1; height:1px; background:var(--muted); opacity:.45; }
+  li.post-end { height:0; border-top:1px solid var(--muted); opacity:.45; margin:0 14px; }
   li.grp { display:flex; justify-content:space-between; align-items:baseline;
     padding:12px 16px 3px; font-size:11px; text-transform:uppercase;
     letter-spacing:.5px; color:var(--brand); font-weight:800; }
@@ -3654,7 +3659,16 @@ function render(){
   }
   const slice = ordered.slice(0, shown);
   let lastStore = null;
-  box.innerHTML = slice.map(l => {
+  // Rows from one Telegram post with 3+ products (a round-up list) share the
+  // channel and the post time: mark where each list starts and ends.
+  const postKey = l => (!grouping && !query && !dosMode && (l.src||"").charAt(0) === "@" && l.date)
+    ? l.src.split(", ")[0] + "|" + l.date : "";
+  const postN = {};
+  slice.forEach(l => { const k = postKey(l); if (k) postN[k] = (postN[k]||0) + 1; });
+  const isList = l => { const k = postKey(l); return k && postN[k] >= 3 ? k : ""; };
+  const fmtPost = iso => { const d = new Date(iso); const z = n => String(n).padStart(2, "0");
+    return isNaN(d) ? "" : z(d.getDate())+"/"+z(d.getMonth()+1)+" "+z(d.getHours())+":"+z(d.getMinutes()); };
+  box.innerHTML = slice.map((l, i) => {
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
     const dot = (l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '') +
       (shopDot(l) ? '<span class="wt-dot '+shopDot(l)+'" title="'+esc(l.shop || 'Worten')+(l.aw ? ' (Awin)' : '')+'"></span>' : '');
@@ -3701,6 +3715,13 @@ function render(){
       th + '<span class="name"'+(l.src ? ' title="Publicado por: '+esc(l.src)+'"' : '')+'>'+(dosMode && l.x>1 ? '<span class="xn">['+l.x+'x]</span>' : '')+dot+stref+esc(l.name)+'</span>'+
       ((wbadge + cpn + kxt + val + src) ? '<span class="tags">'+wbadge + cpn + kxt + val + src+'</span>' : '') + tag +
       '<span class="arrow">&rsaquo;</span></a></li>';
+    const lk = isList(l), prevK = i ? isList(slice[i-1]) : "", nextK = i + 1 < slice.length ? isList(slice[i+1]) : "";
+    if (lk && lk !== prevK) {
+      const head = '<li class="post-sep" title="Lista publicada por '+esc(l.src.split(", ")[0])+'">'+
+        esc(fmtPost(l.date))+' · '+postN[lk]+' produtos</li>';
+      return head + row;
+    }
+    if (lk && nextK !== lk && !nextK) return row + '<li class="post-end"></li>';
     if (grouping) {
       const s = l.store || "Outras";
       if (s !== lastStore) {
