@@ -3336,6 +3336,10 @@ def generate_amazon_html() -> str:
     color:var(--muted); font-size:10px; letter-spacing:.3px; }
   li.post-sep::after { content:""; flex:1; height:1px; background:var(--muted); opacity:.45; }
   li.post-end { height:0; border-top:1px solid var(--muted); opacity:.45; margin:0 14px; }
+  li.upbar { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border); }
+  .up-btn { cursor:pointer; border:1px solid var(--brand); color:var(--brand); border-radius:6px; padding:4px 10px; font-size:13px; font-weight:700; }
+  .up-btn:hover { background:var(--brand); color:#000; }
+  .up-info { color:var(--muted); font-size:12px; }
   li.grp { display:flex; justify-content:space-between; align-items:baseline;
     padding:12px 16px 3px; font-size:11px; text-transform:uppercase;
     letter-spacing:.5px; color:var(--brand); font-weight:800; }
@@ -3451,6 +3455,7 @@ const TABS = [
   { id:"f5",     label:"Compra",     src:"/data/f5.json",           kind:"tg" },
   { id:"f6",     label:"El",         src:"/data/f6.json",           kind:"tg" },
   { id:"bom",    label:"Bom",        src:"/data/bom.json",          kind:"tg", group:true },
+  { id:"amzl",   label:"Lista Amazon", src:"/data/amzlist.json",    kind:"tg", group:true, upload:true, nomerge:true },
   { id:"alix",   label:"AliExpress", src:"/data/aliexpress.json",   kind:"tg" },
   { id:"pcc",    label:"PCComponentes", src:"/data/pccomponentes.json", kind:"tg" },
   { id:"worten", label:"Worten",     src:"/data/worten.json",       kind:"tg" },
@@ -3489,7 +3494,7 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:fmtDate(l.date), disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null, src:l.src||"" }));
+    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:tab.upload ? "" : fmtDate(l.date), t100:l.t100||0, disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null, src:l.src||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -3508,7 +3513,9 @@ async function fetchTab(tab, etag){
   try {
     const r = await fetch(tab.src + (etag ? "?v=" + encodeURIComponent(etag) : "?t=" + Date.now()));
     if (r.ok) {
-      cache[tab.id] = normalize(tab, await r.json());
+      const j = await r.json();
+      if (j && j.title) listInfo[tab.id] = j.title + (j.updated ? " · carregada " + new Date(j.updated).toLocaleString("pt-PT", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "");
+      cache[tab.id] = normalize(tab, j);
       if (etag) seen[keyOf(tab.src)] = etag;
     }
   } catch(e) { cache[tab.id] = cache[tab.id] || []; }
@@ -3592,6 +3599,7 @@ function visibleItems(){
   if (dosMode && !query) {   // one merged list: most-shared first, then newest
     const best = new Map();
     for (const t of TABS) {
+      if (t.nomerge) continue;   // reference lists (Amazon bestsellers) stay in their own tab
       const th = hiddenSet(t.id);
       for (const l of (cache[t.id]||[])) {
         if (!t.others && !isAmazon(l) && !shopDot(l)) continue;   // other stores: featured ones everywhere, the rest only from the tabs that follow them
@@ -3636,7 +3644,10 @@ function render(){
   const items = visibleItems();
   document.getElementById("meta").textContent = items.length + " links";
   const box = document.getElementById("list");
-  if (!items.length) { box.innerHTML = '<div class="empty">Sem links.</div>';
+  const upBar = (current.upload && !query && !dosMode) ? '<li class="upbar"><label class="up-btn">📄 Carregar lista (.xlsx)'+
+    '<input type="file" accept=".xlsx,.xls" onchange="uploadAmzList(this)" hidden></label>'+
+    '<span class="up-info" id="upInfo">'+esc(listInfo[current.id] || "")+'</span></li>' : '';
+  if (!items.length) { box.innerHTML = upBar + '<div class="empty">Sem links.</div>';
     document.getElementById("moreBtn").style.display="none"; return; }
   const visited = visitedSet();
   const useGreen = current.kind !== "tg";
@@ -3668,7 +3679,7 @@ function render(){
   const isList = l => { const k = postKey(l); return k && postN[k] >= 3 ? k : ""; };
   const fmtPost = iso => { const d = new Date(iso); const z = n => String(n).padStart(2, "0");
     return isNaN(d) ? "" : z(d.getDate())+"/"+z(d.getMonth()+1)+" "+z(d.getHours())+":"+z(d.getMinutes()); };
-  box.innerHTML = slice.map((l, i) => {
+  box.innerHTML = upBar + slice.map((l, i) => {
     const dotTitle = l.low ? ('Mínimo de sempre'+(l.minp?': '+l.minp+'€':'')+(l.minlbl?' ('+l.minlbl+')':'')) : '';
     const dot = (l.low ? '<span class="low-dot" title="'+esc(dotTitle)+'"></span>' : '') +
       (shopDot(l) ? '<span class="wt-dot '+shopDot(l)+'" title="'+esc(l.shop || 'Worten')+(l.aw ? ' (Awin)' : '')+'"></span>' : '');
@@ -3689,7 +3700,8 @@ function render(){
       (k.ms ? '<span class="tag kx hot" title="Comprados no último mês (Amazon)">🔥 '+(k.ms >= 1000 ? Math.floor(k.ms/1000)+'K' : k.ms)+'+/mês</span>' : '') +
       (k.tr ? '<span class="tag kx hot" title="Ranking de vendas a subir (bem melhor que a média de 30 dias)">📈 a subir</span>' : '');
     // Validity of a coupon/offer ("até dd/mm"), when the source states it.
-    const val = l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '';
+    const val = (l.val ? '<span class="tag">até '+esc(l.val)+'</span>' : '') +
+      (l.t100 && l.store !== TOP100 ? '<span class="tag kx hot" title="Está no Top 100 geral da lista Amazon">🏆 Top 100</span>' : '');
     // Click-to-copy coupon chip (stops the row link from opening).
     const cpn = (l.coupons || (l.coupon ? [l.coupon] : [])).map(c =>
       '<button type="button" class="cpn" data-code="'+esc(c)+'" title="Copiar cupão" onclick="copyCoupon(event,this)">🎟️ '+esc(c)+'</button>').join('');
@@ -3734,6 +3746,66 @@ function render(){
     return row;
   }).join("");
   document.getElementById("moreBtn").style.display = items.length > shown ? "" : "none";
+}
+
+// "Lista Amazon": the bestseller workbook Amazon sends. Parsed here (SheetJS,
+// loaded only when needed) and saved through the worker for every device.
+const listInfo = {};
+const TOP100 = "🏆 Top 100 geral";
+function loadXlsxLib(){
+  return window.XLSX ? Promise.resolve() : new Promise((ok, ko) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.onload = ok; s.onerror = ko; document.head.appendChild(s);
+  });
+}
+async function uploadAmzList(input){
+  const f = input.files && input.files[0];
+  const info = document.getElementById("upInfo");
+  if (!f) return;
+  info.textContent = "A ler " + f.name + "…";
+  try {
+    await loadXlsxLib();
+    const wb = XLSX.read(await f.arrayBuffer(), { type: "array" });
+    const rowsOf = n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: "" });
+    const isAsin = v => /^[A-Z0-9]{10}$/.test(String(v).trim());
+    const items = n => rowsOf(n).filter(r => isAsin(r[0])).map(r => ({ asin: String(r[0]).trim(), name: String(r[1] || "").trim() }));
+    // Category order: by revenue (first column of the ranking sheet).
+    const rankSheet = wb.SheetNames.find(n => /ranking/i.test(n) && /gl/i.test(n));
+    const topSheet = wb.SheetNames.find(n => /ranking/i.test(n) && /asin/i.test(n));
+    const order = rankSheet ? rowsOf(rankSheet).slice(2).map(r => String(r[0]).trim()).filter(Boolean) : [];
+    const cats = wb.SheetNames.filter(n => n !== rankSheet && n !== topSheet)
+      .sort((a, b) => { const ia = order.indexOf(a), ib = order.indexOf(b);
+        return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib); });
+    const top = topSheet ? items(topSheet) : [];
+    const topSet = new Set(top.map(i => i.asin));
+    const now = Date.now(), links = [];
+    // Dates only order the groups (Top 100 first, then categories by revenue)
+    // and, inside a category, the Top 100 products first.
+    const push = (grp, gi, list) => list
+      .sort((a, b) => (topSet.has(b.asin) ? 1 : 0) - (topSet.has(a.asin) ? 1 : 0))
+      .forEach((it, k) => links.push({ url: "https://www.amazon.es/dp/" + it.asin, name: it.name || it.asin,
+        store: grp, t100: topSet.has(it.asin) ? 1 : 0, date: new Date(now - (gi * 1000 + k) * 1000).toISOString() }));
+    const PT = { "Home":"Casa", "Toys":"Brinquedos", "Computers":"Informática", "Electronics":"Eletrónica",
+      "Kitchen":"Cozinha", "Cell Phones & Accessories":"Telemóveis e acessórios", "Health & Personal Care":"Saúde e cuidado pessoal",
+      "Home Improvement":"Bricolage", "Furniture":"Mobiliário", "Beauty":"Beleza", "Softlines Private Label":"Moda (marcas Amazon)",
+      "Sports":"Desporto", "Baby":"Bebé", "Pet Products":"Animais", "Grocery":"Supermercado", "Apparel":"Moda", "Shoes":"Calçado",
+      "Video Games":"Videojogos", "Books":"Livros", "Office Products":"Escritório", "Automotive":"Automóvel", "Lawn & Garden":"Jardim" };
+    push(TOP100, 0, top);
+    cats.forEach((c, i) => push(PT[c] || c, i + 1, items(c)));
+    if (!links.length) throw new Error("sem ASINs no ficheiro");
+    const title = String((rowsOf(wb.SheetNames[0])[0] || [])[0] || f.name).replace(/\.$/, "");
+    const r = await fetch("/api/amzlist", { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, links }) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = { title, updated: new Date().toISOString(), links };
+    listInfo[current.id] = title + " · carregada agora (" + links.length + " produtos, " + cats.length + " categorias)";
+    cache[current.id] = normalize(current, j);
+    render();
+  } catch (e) {
+    info.textContent = "Erro: " + (e.message || e);
+  }
+  input.value = "";
 }
 
 function copyCoupon(ev, el){

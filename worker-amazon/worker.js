@@ -242,6 +242,23 @@ export default {
       return Response.json({ ok: true, hidden: items.length }, { headers: cors });
     }
 
+    // POST /api/amzlist — the bestseller list Amazon sends (an .xlsx parsed in
+    // the browser) saved as the "Lista Amazon" tab feed. Logged-in only.
+    if (request.method === "POST" && url.pathname === "/api/amzlist") {
+      const raw = await request.text();
+      if (raw.length > 3_000_000) return new Response("Too large", { status: 413, headers: cors });
+      let data;
+      try { data = JSON.parse(raw); } catch (e) { data = null; }
+      const links = data && Array.isArray(data.links) ? data.links.filter((l) =>
+        l && typeof l.url === "string" && /^https:\/\/www\.amazon\.[a-z.]+\/dp\/[A-Z0-9]{10}$/.test(l.url)) : [];
+      if (!links.length) return new Response("No links", { status: 400, headers: cors });
+      const out = { updated: new Date().toISOString(), title: String(data.title || "").slice(0, 200), links };
+      await env.BUCKET.put("data/amzlist.json", JSON.stringify(out), {
+        httpMetadata: { contentType: "application/json" },
+      });
+      return Response.json({ ok: true, links: links.length }, { headers: cors });
+    }
+
     // POST /api/clear — hide every current Telegram link for all devices.
     if (request.method === "POST" && url.pathname === "/api/clear") {
       let data = { links: [] };
