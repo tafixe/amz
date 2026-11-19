@@ -3494,7 +3494,8 @@ function fmtDate(iso){ if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) r
 
 function normalize(tab, raw){
   if (tab.kind === "tg") {
-    return (raw.links||[]).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:tab.upload ? "" : fmtDate(l.date), t100:l.t100||0, disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null, src:l.src||"" }));
+    const once = new Set();   // uploaded lists: an ASIN only once (first = Top 100 / best category)
+    return (raw.links||[]).filter(l => !tab.upload || (!once.has(l.url) && once.add(l.url))).map(l => ({ name:l.name, url:l.url, date:l.date||"", extra:tab.upload ? "" : fmtDate(l.date), t100:l.t100||0, disc:false, low:!!l.low, minp:l.minp, minlbl:l.minlbl, coupon:l.coupon||"", img:l.img||"", store:l.store||"", val:l.val||"", net:l.net||"", x:l.x||1, wt:!!l.wt, aw:!!l.aw, shop:l.shop||"", kx:l.kx||null, src:l.src||"" }));
   }
   return (raw||[]).map(l => ({
     name:l.name, url:l.url,
@@ -3779,10 +3780,11 @@ async function uploadAmzList(input){
         return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib); });
     const top = topSheet ? items(topSheet) : [];
     const topSet = new Set(top.map(i => i.asin));
-    const now = Date.now(), links = [];
+    const now = Date.now(), links = [], used = new Set();   // each ASIN once: Top 100 first, then the best-selling category
     // Dates only order the groups (Top 100 first, then categories by revenue)
     // and, inside a category, the Top 100 products first.
     const push = (grp, gi, list) => list
+      .filter(it => !used.has(it.asin) && used.add(it.asin))
       .sort((a, b) => (topSet.has(b.asin) ? 1 : 0) - (topSet.has(a.asin) ? 1 : 0))
       .forEach((it, k) => links.push({ url: "https://www.amazon.es/dp/" + it.asin, name: it.name || it.asin,
         store: grp, t100: topSet.has(it.asin) ? 1 : 0, date: new Date(now - (gi * 1000 + k) * 1000).toISOString() }));
