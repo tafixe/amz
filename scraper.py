@@ -2155,6 +2155,7 @@ SA_KEY = "data/sa.json"
 # upload (the total per-run budget is unchanged: other tabs get what is left).
 AMZLIST_KEY = "data/amzlist.json"
 AMZLIST_DAYS = int(os.environ.get("AMZLIST_DAYS", "7"))
+AMZLIST_NEW_PER_RUN = int(os.environ.get("AMZLIST_NEW_PER_RUN", "35"))   # Keepa refills ~50 per 10-min run
 
 
 def amzlist_keepa_first(low_cache: dict, price_budget: list, all_asins: set):
@@ -2170,8 +2171,12 @@ def amzlist_keepa_first(low_cache: dict, price_budget: list, all_asins: set):
         return
     used = 0
     if KEEPA_API_KEY and age < timedelta(days=AMZLIST_DAYS) and price_budget[0] > 0:
-        used = keepa_low_refresh(asins, low_cache, price_budget[0], price_budget[0])
-        price_budget[0] -= used
+        # Never-priced list ASINs get their own burst (AMZLIST_NEW_PER_RUN) on
+        # top of the normal run budget, so a fresh upload is done in hours;
+        # only daily re-checks of the list come out of the other tabs' budget.
+        new_n = sum(1 for a in set(asins) if a and not (low_cache.get(a) or {}).get("checked"))
+        used = keepa_low_refresh(asins, low_cache, price_budget[0], AMZLIST_NEW_PER_RUN)
+        price_budget[0] -= max(0, used - min(new_n, AMZLIST_NEW_PER_RUN))
     priced = sum(1 for a in asins if (low_cache.get(a) or {}).get("checked"))
     log.info("[amzlist] keepa first: priced %d this run, %d/%d priced, %d tokens left for the other tabs",
              used, priced, len(asins), price_budget[0])
