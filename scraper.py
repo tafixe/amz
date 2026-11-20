@@ -2155,7 +2155,7 @@ SA_KEY = "data/sa.json"
 # upload (the total per-run budget is unchanged: other tabs get what is left).
 AMZLIST_KEY = "data/amzlist.json"
 AMZLIST_DAYS = int(os.environ.get("AMZLIST_DAYS", "7"))
-AMZLIST_NEW_PER_RUN = int(os.environ.get("AMZLIST_NEW_PER_RUN", "35"))   # Keepa refills ~50 per 10-min run
+AMZLIST_NEW_PER_RUN = int(os.environ.get("AMZLIST_NEW_PER_RUN", "0"))   # extra burst off: the list uses the normal 15/run
 
 
 def amzlist_keepa_first(low_cache: dict, price_budget: list, all_asins: set):
