@@ -3981,6 +3981,9 @@ document.getElementById("list").addEventListener("click", function(e){
     let d = li.dataset.date || "";
     for (const t of TABS) for (const l of (cache[t.id]||[]))
       if (l.url === u && (l.date||"") > d) d = l.date;
+    // Uploaded list: rows get re-ordered (dates swapped) as Keepa ranks them,
+    // so stamp the list's newest date: the row stays gone until a new upload.
+    if (current.upload) for (const l of (cache[current.id]||[])) if ((l.date||"") > d) d = l.date;
     serverHidden.set(u, d || new Date().toISOString());
     hideOnServer([{url:u, date:d}]); li.remove();
     document.getElementById("meta").textContent = visibleItems().length + " links";
