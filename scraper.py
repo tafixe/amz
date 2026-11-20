@@ -3719,7 +3719,7 @@ function render(){
   // Grouped mode (e.g. Bom): compact rows bucketed by store — stores ordered
   // by their newest offer, coupons first inside each store.
   const grouping = !!current.group && !query && !dosMode;
-  box.classList.toggle("compact", grouping);
+  box.classList.toggle("compact", grouping && !current.upload);   // uploaded list: same rows as the deal tabs
   let ordered = items, counts = {};
   if (grouping) {
     const newest = {};
