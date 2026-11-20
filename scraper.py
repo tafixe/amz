@@ -2150,6 +2150,66 @@ def get_cholloes_items() -> list[tuple[str, str, str, bool, str]]:
 
 SA_KEY = "data/sa.json"
 
+# Uploaded bestseller list ("Lista Amazon" tab): its ASINs are priced on Keepa
+# BEFORE every other tab, with the whole run budget, for AMZLIST_DAYS after the
+# upload (the total per-run budget is unchanged: other tabs get what is left).
+AMZLIST_KEY = "data/amzlist.json"
+AMZLIST_DAYS = int(os.environ.get("AMZLIST_DAYS", "7"))
+
+
+def amzlist_keepa_first(low_cache: dict, price_budget: list, all_asins: set):
+    d = r2_get_amazon_links(AMZLIST_KEY)
+    links = [l for l in (d.get("links") or []) if isinstance(l, dict) and l.get("url")]
+    if not links or not d.get("updated"):
+        return
+    asins = [_asin_from_url(l["url"]) for l in links]
+    all_asins.update(a for a in asins if a)   # keep their cache entries
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(d["updated"])
+    except ValueError:
+        return
+    used = 0
+    if KEEPA_API_KEY and age < timedelta(days=AMZLIST_DAYS) and price_budget[0] > 0:
+        used = keepa_low_refresh(asins, low_cache, price_budget[0], price_budget[0])
+        price_budget[0] -= used
+    priced = sum(1 for a in asins if (low_cache.get(a) or {}).get("checked"))
+    log.info("[amzlist] keepa first: priced %d this run, %d/%d priced, %d tokens left for the other tabs",
+             used, priced, len(asins), price_budget[0])
+    if not used and d.get("kp") == priced:
+        return
+    for l in links:
+        e = low_cache.get(_asin_from_url(l["url"])) or {}
+        for k in ("img", "kx", "low", "minp", "minlbl", "rk"):
+            l.pop(k, None)
+        if e.get("i"):
+            l["img"] = e["i"]
+        if e.get("kx"):
+            l["kx"] = e["kx"]
+        if e.get("rank"):
+            l["rk"] = e["rank"]
+        if e.get("low"):
+            l["low"] = True
+            if e.get("min"):
+                l["minp"] = round(e["min"] / 100, 2)
+                l["minlbl"] = e.get("lbl", "")
+    # Inside each group, best sellers first: Amazon's "bought in past month",
+    # then Keepa sales rank; not-yet-priced rows keep their place at the end.
+    # The group's own dates are reused, so the group order does not change.
+    groups: dict = {}
+    for l in links:
+        groups.setdefault(l.get("store", ""), []).append(l)
+    for rows in groups.values():
+        dates = sorted((r.get("date", "") for r in rows), reverse=True)
+        rows.sort(key=lambda r: (-((r.get("kx") or {}).get("ms") or 0), r.get("rk") or 10**9))
+        for r, dt in zip(rows, dates):
+            r["date"] = dt
+    if r2_get_amazon_links(AMZLIST_KEY).get("updated") != d["updated"]:
+        return   # a new list was uploaded meanwhile: leave it alone
+    d["links"] = [r for rows in groups.values() for r in rows]
+    d["kp"] = priced
+    r2_put_amazon_links(d, AMZLIST_KEY)
+
+
 
 def get_sa_items() -> list[tuple[str, str, str, bool, str]]:
     """Automated Amazon-deals site: one public JSON file with every deal
@@ -2606,6 +2666,10 @@ def scrape_amazon_links():
     low_cache = r2_get_amazon_links(LOW_KEY).get("k", {})
     all_asins = set()           # every ASIN shown this run -> to bound the cache
     price_budget = [KEEPA_MAX_PRICE_PER_RUN]
+    try:
+        amzlist_keepa_first(low_cache, price_budget, all_asins)
+    except Exception as e:   # the uploaded list must never break the run
+        log.error("amzlist keepa: %s", e)
 
     # Deals on several lists are NOT removed anymore: every tab keeps its copy
     # and the UI colors the row, stronger the more lists carry it. `results`
