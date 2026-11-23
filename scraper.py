@@ -3623,6 +3623,14 @@ function pushUndo(url, prev){
     sessionStorage.setItem("amzUndo", JSON.stringify(st.slice(-50))); } catch(e) {}
   try { history.pushState({ amzUndo: 1 }, ""); } catch(e) {}
 }
+// Cmd/Ctrl+Z does the same (goes back one entry -> popstate below).
+document.addEventListener("keydown", e => {
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || (e.key || "").toLowerCase() !== "z") return;
+  if (e.target.closest && e.target.closest("input, textarea, [contenteditable]")) return;
+  if (!undoStack().length) return;
+  e.preventDefault();
+  history.back();
+});
 window.addEventListener("popstate", () => {
   const st = undoStack(), it = st.pop();
   if (!it) return;
