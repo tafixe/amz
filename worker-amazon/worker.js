@@ -236,7 +236,13 @@ export default {
       if (items.length) {
         const h = await loadHidden();
         const now = new Date().toISOString();
-        for (const it of items) h[it.url] = (typeof it.date === "string" && it.date) ? it.date : now;
+        for (const it of items) {
+          if (it.undo) {   // "back" on the page: restore the stamp it had before (or none)
+            if (typeof it.date === "string" && it.date) h[it.url] = it.date; else delete h[it.url];
+            continue;
+          }
+          h[it.url] = (typeof it.date === "string" && it.date) ? it.date : now;
+        }
         await saveHidden(h);
       }
       return Response.json({ ok: true, hidden: items.length }, { headers: cors });

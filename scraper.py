@@ -3615,6 +3615,24 @@ async function loadHidden(etag){
 // hide (the deal then came back on the next refresh). Recent hides are also
 // remembered locally and re-asserted if the server ever lacks them.
 let hideQueue = [], hideBusy = false;
+// Browser "back" brings back the last deal hidden by opening it: every hide
+// adds a history entry; going back pops it and restores the previous stamp.
+function undoStack(){ try { return JSON.parse(sessionStorage.getItem("amzUndo")||"[]"); } catch(e){ return []; } }
+function pushUndo(url, prev){
+  try { const st = undoStack(); st.push({ url, prev: prev === undefined ? null : prev });
+    sessionStorage.setItem("amzUndo", JSON.stringify(st.slice(-50))); } catch(e) {}
+  try { history.pushState({ amzUndo: 1 }, ""); } catch(e) {}
+}
+window.addEventListener("popstate", () => {
+  const st = undoStack(), it = st.pop();
+  if (!it) return;
+  try { sessionStorage.setItem("amzUndo", JSON.stringify(st)); } catch(e) {}
+  if (it.prev === null) serverHidden.delete(it.url); else serverHidden.set(it.url, it.prev);
+  try { const r = recentHides(); delete r[it.url]; localStorage.setItem("amzRecentHides", JSON.stringify(r)); } catch(e) {}
+  hideQueue.push({ url: it.url, date: it.prev || "", undo: 1 });   // same queue: runs after the hide
+  pumpHides();
+  render();
+});
 function recentHides(){ try { return JSON.parse(localStorage.getItem("amzRecentHides")||"{}"); } catch(e){ return {}; } }
 function rememberHides(items){
   try {
@@ -3989,6 +4007,7 @@ document.getElementById("list").addEventListener("click", function(e){
     // Uploaded list: rows get re-ordered (dates swapped) as Keepa ranks them,
     // so stamp the list's newest date: the row stays gone until a new upload.
     if (current.upload) for (const l of (cache[current.id]||[])) if ((l.date||"") > d) d = l.date;
+    pushUndo(u, serverHidden.get(u));
     serverHidden.set(u, d || new Date().toISOString());
     hideOnServer([{url:u, date:d}]); li.remove();
     document.getElementById("meta").textContent = visibleItems().length + " links";
