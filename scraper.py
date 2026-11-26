@@ -2073,7 +2073,7 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
                 key = str(pid or hrefs[0])
                 if key not in pg_map and fetched < PG_PAGE_FETCH_MAX:
                     fetched += 1
-                    time.sleep(1.5)
+                    time.sleep(3)   # ~12 quick reads in a row get HTTP 429
                     try:
                         pr = sess.get(hrefs[0], timeout=40)
                         if pr.status_code == 200:
