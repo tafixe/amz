@@ -2005,6 +2005,8 @@ def get_g4_items() -> list[tuple[str, str, str, bool, str]]:
 # ---------------------------------------------------------------------------
 PG_PAGES = int(os.environ.get("PG_PAGES", "3"))
 PG_KEY = "data/pg.json"
+PG_MAP_KEY = "data/pg_map.json"
+PG_PAGE_FETCH_MAX = int(os.environ.get("PG_PAGE_FETCH_MAX", "20"))
 
 
 def _pg_cfg() -> dict:
@@ -2040,6 +2042,8 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
         log.warning("pg rest: %s", e)
     seen = set()
     wt = 0
+    pg_map = r2_get_amazon_links(PG_MAP_KEY).get("m") or {}
+    fetched = 0
     lst = (cfg.get("list") or "").strip("/")
     for page in range(1, PG_PAGES + 1):
         if page > 1:
@@ -2060,8 +2064,28 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
         for c in cards:
             m = re.search(r"post-(\d+)", c[:300])
             pid = int(m.group(1)) if m else None
-            outs = [html.unescape(u) for u in re.findall(r'href="(https?://[^"]+)"', c)
+            hrefs = [html.unescape(u) for u in re.findall(r'href="(https?://[^"]+)"', c)]
+            outs = [u for u in hrefs
                     if urlparse(u).netloc.lower().removeprefix("www.") != urlparse(base).netloc.lower().removeprefix("www.")]
+            if not outs and hrefs:
+                # Cards now link only to the product page: its outbound store
+                # link is read once per product (cached) and a few per run.
+                key = str(pid or hrefs[0])
+                if key not in pg_map and fetched < PG_PAGE_FETCH_MAX:
+                    fetched += 1
+                    time.sleep(1.5)
+                    try:
+                        pr = sess.get(hrefs[0], timeout=40)
+                        if pr.status_code == 200:
+                            om = re.search(r'href="(https?://(?:www\.)?(?:amazon\.es/[^"]+|worten\.pt/[^"]+))"', pr.text)
+                            pg_map[key] = html.unescape(om.group(1)) if om else ""
+                        else:
+                            log.warning("pg product page: HTTP %s", pr.status_code)
+                            fetched = PG_PAGE_FETCH_MAX   # rate-limited: stop for this run
+                    except requests.RequestException as e:
+                        log.warning("pg product page: %s", e)
+                if pg_map.get(key):
+                    outs = [pg_map[key]]
             if not outs:
                 continue
             text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c))
@@ -2078,7 +2102,12 @@ def get_pg_items() -> list[tuple[str, str, str, bool, str]]:
             elif store.lower() == "worten":
                 tab_other("Worten", outs[0], date, "", name)
                 wt += 1
-    log.info("pg: %d amazon.es products, %d worten (%d dated posts)", len(out), wt, len(dates))
+    if fetched:
+        if len(pg_map) > 5000:
+            pg_map = dict(list(pg_map.items())[-5000:])
+        r2_put_amazon_links({"m": pg_map}, PG_MAP_KEY)
+    log.info("pg: %d amazon.es products, %d worten (%d dated posts, %d product pages read)",
+             len(out), wt, len(dates), fetched)
     return out
 
 
