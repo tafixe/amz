@@ -2207,7 +2207,7 @@ def get_cupoes_items() -> list:
     except ValueError:
         due = True
     if KEEPA_API_KEY and due:
-        base = {"current_SALES_gte": 1, "sort": [["current_SALES", "asc"]],
+        base = {"current_SALES_gte": 1, "sort": [["current_SALES", "asc"]], "singleVariation": True,
                 "perPage": COUPON_PER_QUERY, "page": 0}
         found = []
         for f in ({"couponOneTimePercent_gte": 5}, {"couponOneTimeAbsolute_gte": 100}):
@@ -2215,10 +2215,9 @@ def get_cupoes_items() -> list:
             if got is None:
                 break
             found += got
-        else:
-            for a in found:
-                seen.setdefault(a, now.isoformat())
-            last = now.isoformat()
+        for a in found:
+            seen.setdefault(a, now.isoformat())
+        last = now.isoformat()   # even on an error: retried in COUPON_HOURS, not every run
     # Found but never priced: a few per run (own small budget) for the name,
     # photo and coupon value; they show up once priced.
     unpriced = [a for a in seen if not (low_cache.get(a) or {}).get("checked")]
@@ -2875,11 +2874,52 @@ def scrape_amazon_links():
     log.info("[data/worten.json] worten tab: %d links (%d short links opened this run)",
              len(wt_links), _SHORT_OPENED[0])
 
+    # Cupões tab also gathers the coupon deals of every other list: Amazon rows
+    # with a coupon code from the post, or a clip / S&S coupon seen on Keepa.
+    cup = results.get(COUPON_KEY)
+    if cup is not None:
+        by_asin = {_asin_from_url(l["url"]): l for l in cup.get("links", [])}
+        added = 0
+        for sk, state in results.items():
+            if sk == COUPON_KEY:
+                continue
+            for l in state.get("links", []):
+                a = _asin_from_url(l.get("url", ""))
+                kx = l.get("kx") or {}
+                if not a or not (l.get("coupon") or kx.get("cp") or kx.get("sc")):
+                    continue
+                p = by_asin.get(a)
+                if p is None:
+                    row = dict(l)
+                    row.pop("x", None)
+                    by_asin[a] = row
+                    added += 1
+                else:
+                    if l.get("coupon") and not p.get("coupon"):
+                        p["coupon"] = l["coupon"]
+                    if (l.get("date") or "") > (p.get("date") or ""):
+                        p["date"] = l["date"]
+        # One row per product: colour/size variants share the title, so keep
+        # only the newest row of each name (codes gathered onto it).
+        by_name: dict = {}
+        for l in sorted(by_asin.values(), key=lambda l: l.get("date") or "", reverse=True):
+            k = re.sub(r"\W+", " ", (l.get("name") or "").lower()).strip()[:60] or l["url"]
+            p = by_name.get(k)
+            if p is None:
+                by_name[k] = l
+            elif l.get("coupon") and not p.get("coupon"):
+                p["coupon"] = l["coupon"]
+        cup["links"] = list(by_name.values())
+        r2_put_amazon_links(cup, COUPON_KEY)
+        log.info("[%s] +%d coupon deals from the other lists (%d rows)", COUPON_KEY, added, len(cup["links"]))
+
     # Stamp cross-tab multiplicity: x = number of lists carrying the ASIN this
     # run. Only rows with x >= 2 carry the field; the UI tints them (stronger
     # with more lists). Tabs whose links changed are re-written.
     count: dict = {}
-    for state in results.values():
+    for sk, state in results.items():
+        if sk == COUPON_KEY:
+            continue   # a copy of the other lists' coupon rows: not one more list
         for a in {_asin_from_url(l["url"]) for l in state.get("links", [])} - {""}:
             count[a] = count.get(a, 0) + 1
     for state_key, state in results.items():
