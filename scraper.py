@@ -2166,14 +2166,14 @@ AMZLIST_NEW_PER_RUN = int(os.environ.get("AMZLIST_NEW_PER_RUN", "0"))   # extra 
 # Cupões tab: Amazon products with an active clip coupon, found on Keepa.
 #  - free: every ASIN already priced by any tab whose Keepa data shows a coupon;
 #  - Product Finder: every COUPON_HOURS, the best-selling products with a
-#    coupon (one query each for % and EUR coupons, ~11 tokens each), then the
-#    new ones are priced once (COUPON_PRICE_MAX tokens) for name/photo/value.
+#    coupon (one query each for % and EUR coupons, ~11 tokens each); new ones
+#    are priced COUPON_PRICE_PER_RUN at a time for name/photo/value.
 # Rows are kept only while Keepa still shows the coupon.
 COUPON_KEY = "data/cupoes.json"
 COUPON_MAP_KEY = "data/cupoes_map.json"
 COUPON_HOURS = int(os.environ.get("COUPON_HOURS", "6"))
-COUPON_PER_QUERY = int(os.environ.get("COUPON_PER_QUERY", "100"))
-COUPON_PRICE_MAX = int(os.environ.get("COUPON_PRICE_MAX", "60"))
+COUPON_PER_QUERY = int(os.environ.get("COUPON_PER_QUERY", "50"))
+COUPON_PRICE_PER_RUN = int(os.environ.get("COUPON_PRICE_PER_RUN", "10"))
 COUPON_DAYS = int(os.environ.get("COUPON_DAYS", "4"))
 _COUPON_CTX: dict = {}      # run context (low_cache, name_map) set before the tabs loop
 
@@ -2218,11 +2218,12 @@ def get_cupoes_items() -> list:
         else:
             for a in found:
                 seen.setdefault(a, now.isoformat())
-            # Price the new ones once now (photo, name, coupon value).
-            new = [a for a in dict.fromkeys(found) if not (low_cache.get(a) or {}).get("checked")]
-            if new:
-                keepa_low_refresh(new, low_cache, COUPON_PRICE_MAX, COUPON_PRICE_MAX)
             last = now.isoformat()
+    # Found but never priced: a few per run (own small budget) for the name,
+    # photo and coupon value; they show up once priced.
+    unpriced = [a for a in seen if not (low_cache.get(a) or {}).get("checked")]
+    if KEEPA_API_KEY and unpriced:
+        keepa_low_refresh(unpriced, low_cache, COUPON_PRICE_PER_RUN, COUPON_PRICE_PER_RUN)
     # Free source: any priced ASIN (from any tab) showing a coupon.
     for a, e in low_cache.items():
         if (e.get("kx") or {}).get("cp"):
