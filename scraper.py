@@ -1175,6 +1175,9 @@ KEEPA_TREND_MAX_RANK = 30000
 KEEPA_TYPE_NAMES = {0: "Amazon", 8: "Oferta-relâmpago", 18: "Buy Box", 33: "Prime exclusive"}
 
 
+_KEEPA_TITLES: dict = {}    # ASIN -> title seen in a /product response this run
+
+
 def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_PRICE_PER_RUN,
                       new_cap: int = 0) -> int:
     """Refresh the all-time-low flag for ASINs (transversal to every tab) and
@@ -1242,6 +1245,9 @@ def keepa_low_refresh(asins: list, low_cache: dict, max_count: int = KEEPA_MAX_P
             # it rides in the same 1-token response.
             imgs = p.get("images") or []
             img = (imgs[0].get("m") or imgs[0].get("l") or "") if imgs and isinstance(imgs[0], dict) else ""
+            t = _clean_name(p.get("title") or "")
+            if t:
+                _KEEPA_TITLES[a] = t   # same response, no extra token
             low_cache[a] = {"low": low, "checked": now.isoformat(),
                             "cat": p.get("rootCategory"),
                             "min": lowest, "lbl": KEEPA_TYPE_NAMES.get(lowtype, ""),
@@ -2157,6 +2163,86 @@ AMZLIST_KEY = "data/amzlist.json"
 AMZLIST_DAYS = int(os.environ.get("AMZLIST_DAYS", "7"))
 AMZLIST_NEW_PER_RUN = int(os.environ.get("AMZLIST_NEW_PER_RUN", "0"))   # extra burst off: the list uses the normal 15/run
 
+# Cupões tab: Amazon products with an active clip coupon, found on Keepa.
+#  - free: every ASIN already priced by any tab whose Keepa data shows a coupon;
+#  - Product Finder: every COUPON_HOURS, the best-selling products with a
+#    coupon (one query each for % and EUR coupons, ~11 tokens each), then the
+#    new ones are priced once (COUPON_PRICE_MAX tokens) for name/photo/value.
+# Rows are kept only while Keepa still shows the coupon.
+COUPON_KEY = "data/cupoes.json"
+COUPON_MAP_KEY = "data/cupoes_map.json"
+COUPON_HOURS = int(os.environ.get("COUPON_HOURS", "6"))
+COUPON_PER_QUERY = int(os.environ.get("COUPON_PER_QUERY", "100"))
+COUPON_PRICE_MAX = int(os.environ.get("COUPON_PRICE_MAX", "60"))
+COUPON_DAYS = int(os.environ.get("COUPON_DAYS", "4"))
+_COUPON_CTX: dict = {}      # run context (low_cache, name_map) set before the tabs loop
+
+
+def _keepa_finder(sel: dict) -> list:
+    try:
+        r = requests.get("https://api.keepa.com/query", timeout=60, params={
+            "key": KEEPA_API_KEY, "domain": KEEPA_DOMAIN, "selection": json.dumps(sel)})
+        d = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning("cupoes finder: %s", e)
+        return None
+    log.info("cupoes finder %s: %s results (total %s, tokens left %s)",
+             [k for k in sel if k.startswith("coupon")], len(d.get("asinList") or []),
+             d.get("totalResults"), d.get("tokensLeft"))
+    if "asinList" not in d and d.get("error"):
+        log.warning("cupoes finder error: %s", str(d.get("error"))[:200])
+    return d.get("asinList") or []
+
+
+def get_cupoes_items() -> list:
+    low_cache = _COUPON_CTX.get("low")
+    if low_cache is None:
+        return []
+    now = datetime.now(timezone.utc)
+    st = r2_get_amazon_links(COUPON_MAP_KEY)
+    seen = st.get("d") if isinstance(st.get("d"), dict) else {}
+    last = st.get("t") or ""
+    try:
+        due = (now - datetime.fromisoformat(last)) >= timedelta(hours=COUPON_HOURS)
+    except ValueError:
+        due = True
+    if KEEPA_API_KEY and due:
+        base = {"current_SALES_gte": 1, "sort": [["current_SALES", "asc"]],
+                "perPage": COUPON_PER_QUERY, "page": 0}
+        found = []
+        for f in ({"couponOneTimePercent_gte": 5}, {"couponOneTimeAbsolute_gte": 100}):
+            got = _keepa_finder({**f, **base})
+            if got is None:
+                break
+            found += got
+        else:
+            for a in found:
+                seen.setdefault(a, now.isoformat())
+            # Price the new ones once now (photo, name, coupon value).
+            new = [a for a in dict.fromkeys(found) if not (low_cache.get(a) or {}).get("checked")]
+            if new:
+                keepa_low_refresh(new, low_cache, COUPON_PRICE_MAX, COUPON_PRICE_MAX)
+            last = now.isoformat()
+    # Free source: any priced ASIN (from any tab) showing a coupon.
+    for a, e in low_cache.items():
+        if (e.get("kx") or {}).get("cp"):
+            seen.setdefault(a, now.isoformat())
+    cutoff = (now - timedelta(days=COUPON_DAYS)).isoformat()
+    seen = {a: d for a, d in seen.items()
+            if d >= cutoff or ((low_cache.get(a) or {}).get("kx") or {}).get("cp")}
+    r2_put_amazon_links({"t": last, "d": seen}, COUPON_MAP_KEY)
+    names = _COUPON_CTX.get("names") or {}
+    out = []
+    for a, d in seen.items():
+        e = low_cache.get(a) or {}
+        if e.get("checked") and not (e.get("kx") or {}).get("cp"):
+            continue   # priced and no coupon anymore
+        out.append((f"https://www.amazon.es/dp/{a}", d, "", False,
+                    _KEEPA_TITLES.get(a) or names.get(a) or ""))
+    log.info("cupoes: %d products with a coupon", len(out))
+    return out
+
+
 
 def amzlist_keepa_first(low_cache: dict, price_budget: list, all_asins: set):
     d = r2_get_amazon_links(AMZLIST_KEY)
@@ -2697,11 +2783,13 @@ def scrape_amazon_links():
         ([], [], get_dib_items, "data/dib.json"),
         ([], [], get_pg_items, PG_KEY),
         ([], [], get_sa_items, SA_KEY),
+        ([], [], get_cupoes_items, COUPON_KEY),
         ([], [], get_g4_items, "data/g4.json"),
         (JP_CHANNELS, [], None, "data/jp.json"),
         ([], [], get_xaxu_items, XAXU_KEY),
     ] + [(TG_TABS[k], [], None, f"data/{k}.json") for k in TG_NEW_TABS if TG_TABS.get(k)] + [([], [], make_feed_provider(k), f"data/{k}.json") for k in ("f1", "f2", "f3", "f4", "f5", "f6")]
     _XAXU_CTX["cleared"] = cleared
+    _COUPON_CTX.update(low=low_cache, names=name_map)
     for i, (channels, web_pages, items_fn, state_key) in enumerate(TAB_ROWS):
         # The reference-source sticky-ban is applied via `banned`.
         exclude = None
@@ -2710,7 +2798,7 @@ def scrape_amazon_links():
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", PG_KEY, "data/g4.json", "data/jp.json",
                                 XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json", "data/china.json",
-                                "data/cdc.json", SA_KEY,
+                                "data/cdc.json", SA_KEY, COUPON_KEY,
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -3253,6 +3341,9 @@ def scan_amazon_list(channels, web_pages, state_key, cleared, items_fn=None, exc
         # Curated tab: keep only all-time lows that are also in the top-N most
         # popular (Keepa sales rank <= top_rank). Needs the ASIN to be priced.
         # Price-less catalogue tabs: keep only all-time lows (no rank needed).
+        if state_key == COUPON_KEY:
+            links = [l for l in links
+                     if ((low_cache.get(_asin_from_url(l["url"])) or {}).get("kx") or {}).get("cp")]
         if top_rank or state_key in LOW_ONLY_TABS:
             kept = []
             for l in links:
@@ -3517,6 +3608,7 @@ const TABS = [
   { id:"china",  label:"China",      src:"/data/china.json",        kind:"tg" },
   { id:"cdc",    label:"CdC",        src:"/data/cdc.json",          kind:"tg" },
   { id:"sa",     label:"SA",         src:"/data/sa.json",           kind:"tg" },
+  { id:"cupoes", label:"Cupões",     src:"/data/cupoes.json",       kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
   { id:"f2",     label:"Nolo",       src:"/data/f2.json",           kind:"tg" },
   { id:"f3",     label:"Tus",        src:"/data/f3.json",           kind:"tg" },
