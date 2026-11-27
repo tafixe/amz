@@ -64,7 +64,7 @@ try:
         TG_TABS[_k] = (TG_TABS.get(_k) or []) + _v if isinstance(_v, list) else _v
 except (ValueError, AttributeError, TypeError):
     pass
-TG_NEW_TABS = ("super", "erdc", "caza", "china", "cdc")
+TG_NEW_TABS = ("super", "erdc", "caza", "china", "cdc", "ee")
 
 # Extra Telegram tab ("JP"): channel names in a secret (JSON list).
 try:
@@ -2827,7 +2827,7 @@ def scrape_amazon_links():
                                 "data/cholloes.json", "data/camel.json", "data/titas.json",
                                 "data/terapia.json", "data/dib.json", PG_KEY, "data/g4.json", "data/jp.json",
                                 XAXU_KEY, "data/super.json", "data/erdc.json", "data/caza.json", "data/china.json",
-                                "data/cdc.json", SA_KEY, COUPON_KEY,
+                                "data/cdc.json", "data/ee.json", SA_KEY, COUPON_KEY,
                                 "data/f1.json", "data/f2.json", "data/f3.json",
                                 "data/f4.json", "data/f5.json", "data/f6.json")
         # TITAS: only top-1000 most-popular AND at all-time low.
@@ -3677,6 +3677,7 @@ const TABS = [
   { id:"caza",   label:"Caza",       src:"/data/caza.json",         kind:"tg" },
   { id:"china",  label:"China",      src:"/data/china.json",        kind:"tg" },
   { id:"cdc",    label:"CdC",        src:"/data/cdc.json",          kind:"tg" },
+  { id:"ee",     label:"EE",         src:"/data/ee.json",           kind:"tg" },
   { id:"sa",     label:"SA",         src:"/data/sa.json",           kind:"tg" },
   { id:"cupoes", label:"Cupões",     src:"/data/cupoes.json",       kind:"tg" },
   { id:"f1",     label:"Blog",       src:"/data/f1.json",           kind:"tg" },
